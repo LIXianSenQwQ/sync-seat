@@ -1,0 +1,24 @@
+{
+  "name": "@sync-seat/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "author": "清羽",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0"
+  },
+  "dependencies": {
+    "@sync-seat/shared": "file:../../packages/shared",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "socket.io-client": "^4.8.1",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.4",
+    "vue-tsc": "^2.2.10"
+  }
+}

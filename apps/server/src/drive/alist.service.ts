@@ -1,0 +1,172 @@
+import { BadGatewayException, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
+import type { CurrentVideo, DriveEntry } from "@sync-seat/shared";
+import { EnvConfig, normalizePath } from "../config/env.js";
+import { isSubtitleFile, isVideoFile } from "./file-kind.js";
+
+interface AlistItem {
+  name: string;
+  is_dir: boolean;
+  size?: number;
+  modified?: string;
+  raw_url?: string;
+  type?: number;
+}
+
+interface AlistResponse<T> {
+  code: number;
+  message: string;
+  data: T;
+}
+
+/**
+ * AList/OpenList 访问客户端。
+ *
+ * @author 清羽
+ */
+@Injectable()
+export class AlistService {
+  constructor(private readonly env: EnvConfig = new EnvConfig()) {}
+
+  /**
+   * 浏览白名单目录下的文件和目录。
+   *
+   * @param path 待浏览的网盘路径。
+   * @returns 前端可展示的目录条目。
+   * @throws ForbiddenException 路径不在白名单内。
+   */
+  async listDirectory(path: string): Promise<DriveEntry[]> {
+    const safePath = this.assertAllowedPath(path);
+    const data = await this.request<{ content: AlistItem[] }>("/api/fs/list", {
+      path: safePath,
+      page: 1,
+      per_page: 0,
+      refresh: false
+    });
+
+    // 步骤1：把 AList 原始条目转换成前端稳定的文件类型。
+    return (data.content ?? []).map((item) => {
+      const childPath = normalizePath(`${safePath}/${item.name}`);
+      const type: DriveEntry["type"] = item.is_dir
+        ? "directory"
+        : isVideoFile(item.name)
+          ? "video"
+          : isSubtitleFile(item.name)
+            ? "subtitle"
+            : "file";
+      return {
+        name: item.name,
+        path: childPath,
+        type,
+        size: item.size,
+        modifiedAt: item.modified
+      };
+    });
+  }
+
+  /**
+   * 获取视频可播放直链。
+   *
+   * @param path 视频文件路径。
+   * @returns 当前视频信息。
+   * @throws ForbiddenException 路径不在白名单或不是支持的视频。
+   */
+  async getVideo(path: string): Promise<CurrentVideo> {
+    const safePath = this.assertAllowedPath(path);
+    if (!isVideoFile(safePath)) {
+      throw new ForbiddenException("该文件不是 v1 支持的视频格式");
+    }
+
+    const data = await this.request<AlistItem>("/api/fs/get", { path: safePath });
+    const fileName = safePath.split("/").pop() ?? safePath;
+    return {
+      filePath: safePath,
+      fileName,
+      playUrl: data.raw_url ?? `${this.env.alistBaseUrl}/d${encodeURI(safePath)}`,
+      size: data.size
+    };
+  }
+
+  /**
+   * 读取字幕文件文本。
+   *
+   * @param path 字幕文件路径。
+   * @returns 字幕文本内容。
+   */
+  async readTextFile(path: string): Promise<string> {
+    const safePath = this.assertAllowedPath(path);
+    if (!isSubtitleFile(safePath)) {
+      throw new ForbiddenException("该文件不是 v1 支持的字幕格式");
+    }
+    const file = await this.request<AlistItem>("/api/fs/get", { path: safePath });
+    const url = file.raw_url ?? `${this.env.alistBaseUrl}/d${encodeURI(safePath)}`;
+    const response = await fetch(url, {
+      headers: this.authHeaders()
+    });
+    if (!response.ok) {
+      throw new BadGatewayException("字幕文件读取失败");
+    }
+    return response.text();
+  }
+
+  /**
+   * 获取同目录字幕列表。
+   *
+   * @param videoPath 当前视频路径。
+   * @returns 同目录下的字幕文件。
+   */
+  async listSubtitlesNearVideo(videoPath: string): Promise<DriveEntry[]> {
+    const safePath = this.assertAllowedPath(videoPath);
+    const directory = safePath.slice(0, safePath.lastIndexOf("/")) || "/";
+    return (await this.listDirectory(directory)).filter((entry) => entry.type === "subtitle");
+  }
+
+  assertAllowedPath(path: string): string {
+    const safePath = normalizePath(path);
+    const roots = this.env.allowedRootPaths;
+    if (roots.length === 0) {
+      throw new ForbiddenException("未配置允许访问的网盘根目录");
+    }
+    const allowed = roots.some((root) => safePath === root || safePath.startsWith(`${root}/`));
+    if (!allowed) {
+      throw new ForbiddenException("路径不在允许访问的网盘目录内");
+    }
+    return safePath;
+  }
+
+  private async request<T>(apiPath: string, body: unknown): Promise<T> {
+    if (!this.env.alistBaseUrl || !this.env.alistToken) {
+      throw new BadGatewayException("AList/OpenList 配置不完整");
+    }
+
+    const response = await fetch(`${this.env.alistBaseUrl}${apiPath}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...this.authHeaders()
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      throw new UnauthorizedException("AList/OpenList Token 无效或无权限");
+    }
+    if (!response.ok) {
+      throw new BadGatewayException("AList/OpenList 服务不可用");
+    }
+
+    const payload = (await response.json()) as AlistResponse<T>;
+    if (payload.code === 401 || payload.code === 403) {
+      throw new UnauthorizedException(payload.message || "AList/OpenList 鉴权失败");
+    }
+    if (payload.code !== 200) {
+      throw new BadGatewayException(payload.message || "AList/OpenList 请求失败");
+    }
+    return payload.data;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return {
+      Authorization: this.env.alistToken
+    };
+  }
+}

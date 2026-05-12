@@ -1,0 +1,21 @@
+{
+  "name": "sync-seat",
+  "version": "0.1.0",
+  "private": true,
+  "description": "轻量网盘资源同步观影房间",
+  "author": "清羽",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @sync-seat/server",
+    "dev:web": "npm run dev -w @sync-seat/web",
+    "build": "npm run build -w @sync-seat/shared && npm run build -w @sync-seat/server && npm run build -w @sync-seat/web",
+    "test": "npm run test -w @sync-seat/server",
+    "lint": "npm run lint -ws --if-present"
+  },
+  "engines": {
+    "node": ">=20.11.0"
+  }
+}

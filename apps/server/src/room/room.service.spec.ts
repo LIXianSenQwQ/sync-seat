@@ -1,0 +1,154 @@
+import { ForbiddenException, NotFoundException } from "@nestjs/common";
+import { describe, expect, it, vi } from "vitest";
+import type { CurrentVideo } from "@sync-seat/shared";
+import { RoomService } from "./room.service.js";
+
+const video: CurrentVideo = {
+  filePath: "/Movies/demo.mp4",
+  fileName: "demo.mp4",
+  playUrl: "https://alist.test/d/Movies/demo.mp4"
+};
+
+function createService(): RoomService {
+  return new RoomService(
+    {
+      getVideo: vi.fn(async () => video)
+    } as never,
+    {
+      buildCurrentSubtitle: vi.fn((filePath: string, roomCode: string) => ({
+        filePath,
+        fileName: filePath.split("/").pop() ?? filePath,
+        format: "srt",
+        trackUrl: `/api/rooms/${roomCode}/subtitle.vtt`
+      }))
+    } as never
+  );
+}
+
+describe("RoomService", () => {
+  it("创建空房间并允许用正确密码加入", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "清羽", "secret");
+
+    expect(room.watchMode).toBe("direct");
+    expect(room.hostStreamState).toBeNull();
+    expect(() => service.joinRoom(room.roomCode, "m2", "朋友", "wrong")).toThrow(ForbiddenException);
+    const joined = service.joinRoom(room.roomCode, "m2", "朋友", "secret").room;
+    expect(joined.members).toHaveLength(2);
+  });
+
+  it("创建房主推流房间时初始化推流状态", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "清羽", undefined, "host-stream");
+
+    expect(room.watchMode).toBe("host-stream");
+    expect(room.hostStreamState).toMatchObject({
+      streaming: false,
+      hostMemberId: "m1",
+      fileName: null,
+      version: 0
+    });
+  });
+
+  it("限制单房间最多 3 人", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.joinRoom(room.roomCode, "m2", "B");
+    service.joinRoom(room.roomCode, "m3", "C");
+
+    expect(() => service.joinRoom(room.roomCode, "m4", "D")).toThrow(ForbiddenException);
+  });
+
+  it("相同 memberId 重连时恢复原成员而不是新增成员", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", "secret");
+    service.leaveRoom(room.roomCode, "m1");
+    const joined = service.joinRoom(room.roomCode, "m1", "A2");
+
+    expect(joined.reconnected).toBe(true);
+    expect(joined.room.members).toHaveLength(1);
+    expect(joined.room.members[0]?.connected).toBe(true);
+  });
+
+  it("房主离线 60 秒后按进入顺序自动转让", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.joinRoom(room.roomCode, "m2", "B");
+    const left = service.leaveRoom(room.roomCode, "m1");
+    const disconnectedAt = Date.parse(left.updatedAt);
+
+    service.sweep(disconnectedAt + 60_000);
+
+    expect(service.getRoom(room.roomCode).ownerId).toBe("m2");
+  });
+
+  it("房主推流房间在房主离开后直接关闭", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", undefined, "host-stream");
+    service.joinRoom(room.roomCode, "m2", "B");
+
+    const left = service.leaveRoom(room.roomCode, "m1");
+
+    expect(left.emptySince).not.toBeNull();
+    expect(() => service.getRoom(room.roomCode)).toThrow(NotFoundException);
+  });
+
+  it("空房间 60 秒后释放", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    const left = service.leaveRoom(room.roomCode, "m1");
+    const removed = service.sweep(Date.parse(left.updatedAt) + 60_000);
+
+    expect(removed).toEqual([room.roomCode]);
+  });
+
+  it("播放状态按服务端接收顺序递增版本号，后到为准", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    const first = service.updatePlayback(room.roomCode, { playing: true, positionSeconds: 10 });
+    const second = service.updatePlayback(room.roomCode, { playing: false, positionSeconds: 20 });
+
+    expect(first.playbackState.version).toBe(1);
+    expect(second.playbackState.version).toBe(2);
+    expect(second.playbackState.playing).toBe(false);
+    expect(second.playbackState.positionSeconds).toBe(20);
+  });
+
+  it("加载视频会清空字幕并重置播放位置", async () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.selectSubtitle(room.roomCode, "/Movies/demo.srt");
+    const updated = await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
+
+    expect(updated.currentVideo).toEqual(video);
+    expect(updated.currentSubtitle).toBeNull();
+    expect(updated.playbackState.positionSeconds).toBe(0);
+  });
+
+  it("房主推流模式拒绝网盘选片和字幕状态污染", async () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", undefined, "host-stream");
+
+    await expect(service.loadVideo(room.roomCode, "/Movies/demo.mp4")).rejects.toThrow(ForbiddenException);
+    expect(() => service.selectSubtitle(room.roomCode, "/Movies/demo.srt")).toThrow(ForbiddenException);
+  });
+
+  it("房主可以开始和停止本地推流", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", undefined, "host-stream");
+
+    const started = service.startHostStream(room.roomCode, "m1", "local.mp4");
+    const stopped = service.stopHostStream(room.roomCode, "m1");
+
+    expect(started.hostStreamState).toMatchObject({ streaming: true, fileName: "local.mp4", version: 1 });
+    expect(stopped.hostStreamState).toMatchObject({ streaming: false, fileName: "local.mp4", version: 2 });
+  });
+
+  it("非房主不能开始房主推流", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", undefined, "host-stream");
+    service.joinRoom(room.roomCode, "m2", "B");
+
+    expect(() => service.startHostStream(room.roomCode, "m2", "local.mp4")).toThrow(ForbiddenException);
+  });
+});
