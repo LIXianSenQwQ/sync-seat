@@ -24,7 +24,7 @@ services:
       - "3000"
 
   nginx:
-    image: docker.1panel.live/nginx:alpine
+    image: docker.1ms.run/nginx:alpine
     container_name: sync-seat-nginx
     restart: unless-stopped
     depends_on:
