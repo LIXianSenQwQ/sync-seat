@@ -1,6 +1,10 @@
 name: Build And Push GHCR Image
 
 on:
+  push:
+    # 推送任意 Git tag 时自动构建并发布同名 GHCR 镜像标签。
+    tags:
+      - "*"
   workflow_dispatch:
     inputs:
       image_tag:
@@ -40,8 +44,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.image.outputs.name }}
+          # 手动触发使用输入标签，tag 触发使用 Git tag 名，同时保留 latest 供 compose 默认引用。
           tags: |
-            type=raw,value=${{ inputs.image_tag }}
+            type=raw,value=${{ inputs.image_tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=ref,event=tag
             type=raw,value=latest
 
       - name: Build and push image
