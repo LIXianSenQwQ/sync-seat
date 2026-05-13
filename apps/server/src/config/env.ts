@@ -7,7 +7,8 @@ import type { IceServerConfig } from "@sync-seat/shared";
  */
 export class EnvConfig {
   readonly alistBaseUrl = trimTrailingSlash(process.env.ALIST_BASE_URL ?? "");
-  readonly alistToken = process.env.ALIST_TOKEN ?? "";
+  readonly alistUsername = process.env.ALIST_USERNAME ?? "";
+  readonly alistPassword = process.env.ALIST_PASSWORD ?? "";
   readonly allowedRootPaths = parseCsv(process.env.ALLOWED_ROOT_PATHS).map(normalizePath);
   readonly stunUrls = parseCsv(process.env.WEBRTC_STUN_URLS || "stun:stun.l.google.com:19302");
   readonly turnUrls = parseCsv(process.env.WEBRTC_TURN_URLS);

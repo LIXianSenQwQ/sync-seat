@@ -1,12 +1,13 @@
-import { ForbiddenException } from "@nestjs/common";
+import { BadGatewayException, ForbiddenException } from "@nestjs/common";
 import { describe, expect, it, vi } from "vitest";
 import { EnvConfig } from "../config/env.js";
 import { AlistService } from "./alist.service.js";
 import { isVideoFile } from "./file-kind.js";
 
 class TestEnv extends EnvConfig {
-  override readonly alistBaseUrl = "https://alist.test";
-  override readonly alistToken = "token";
+  override readonly alistBaseUrl: string = "https://alist.test";
+  override readonly alistUsername: string = "admin";
+  override readonly alistPassword: string = "password";
   override readonly allowedRootPaths = ["/Movies"];
 }
 
@@ -29,30 +30,96 @@ describe("AlistService", () => {
   });
 
   it("把 AList 目录条目转换成稳定类型", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          code: 200,
-          message: "success",
-          data: {
-            content: [
-              { name: "Season", is_dir: true },
-              { name: "demo.mp4", is_dir: false, size: 12 },
-              { name: "demo.srt", is_dir: false, size: 3 },
-              { name: "note.txt", is_dir: false }
-            ]
-          }
-        })
-      }))
-    );
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValueOnce(alistResponse({
+        content: [
+          { name: "Season", is_dir: true },
+          { name: "demo.mp4", is_dir: false, size: 12 },
+          { name: "demo.srt", is_dir: false, size: 3 },
+          { name: "note.txt", is_dir: false }
+        ]
+      }));
+    vi.stubGlobal("fetch", fetchMock);
 
     const service = new AlistService(new TestEnv());
     const entries = await service.listDirectory("/Movies");
 
     expect(entries.map((entry) => entry.type)).toEqual(["directory", "video", "subtitle", "file"]);
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "https://alist.test/api/auth/login", expect.objectContaining({
+      body: JSON.stringify({ username: "admin", password: "password" })
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "https://alist.test/api/fs/list", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "token-1" })
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("缓存用户名密码登录换取的 token", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValue(alistResponse({ content: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new AlistService(new TestEnv());
+    await service.listDirectory("/Movies");
+    await service.listDirectory("/Movies");
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "https://alist.test/api/auth/login")).toHaveLength(1);
+    vi.unstubAllGlobals();
+  });
+
+  it("AList 鉴权失败时清空 token 并重新登录重试一次", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValueOnce(alistResponse(null, 401, "token expired"))
+      .mockResolvedValueOnce(alistResponse({ token: "token-2" }))
+      .mockResolvedValueOnce(alistResponse({ content: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new AlistService(new TestEnv());
+    const entries = await service.listDirectory("/Movies");
+
+    expect(entries).toEqual([]);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "https://alist.test/api/auth/login")).toHaveLength(2);
+    expect(fetchMock).toHaveBeenLastCalledWith("https://alist.test/api/fs/list", expect.objectContaining({
+      headers: expect.objectContaining({ Authorization: "token-2" })
+    }));
+    vi.unstubAllGlobals();
+  });
+
+  it("缺少用户名密码时报告配置不完整", async () => {
+    class MissingCredentialsEnv extends TestEnv {
+      override readonly alistUsername = "";
+    }
+    const service = new AlistService(new MissingCredentialsEnv());
+
+    await expect(service.listDirectory("/Movies")).rejects.toThrow(BadGatewayException);
+  });
+
+  it("解析文件真实地址时仍执行白名单校验", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValueOnce(alistResponse({ name: "demo.mp4", is_dir: false, raw_url: "https://cdn.test/demo.mp4" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new AlistService(new TestEnv());
+
+    await expect(service.resolveFileUrl("/Private/demo.mp4")).rejects.toThrow(ForbiddenException);
+    await expect(service.resolveFileUrl("/Movies/demo.mp4")).resolves.toBe("https://cdn.test/demo.mp4");
     vi.unstubAllGlobals();
   });
 });
+
+function alistResponse<T>(data: T, code = 200, message = "success"): unknown {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      code,
+      message,
+      data
+    })
+  };
+}

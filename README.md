@@ -27,7 +27,8 @@
 3. 修改 `.env`：
 
    - `ALIST_BASE_URL`
-   - `ALIST_TOKEN`
+   - `ALIST_USERNAME`
+   - `ALIST_PASSWORD`
    - `ALLOWED_ROOT_PATHS`
    - 可选 `WEBRTC_TURN_*`
 
@@ -45,4 +46,4 @@ npm run test -w @sync-seat/server
 npm run build
 ```
 
-当前 v1 不做账号系统、聊天、播放列表、历史记录、视频代理、转码、多实例部署和 SFU 语音。
+当前 v1 不做账号系统、聊天、播放列表、历史记录、视频流代理、转码、多实例部署和 SFU 语音。直链同步模式下，房间播放地址由后端校验后 302 跳转到 AList/OpenList 真实地址。

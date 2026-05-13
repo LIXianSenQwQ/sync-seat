@@ -212,7 +212,10 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     const room = this.getStoredRoom(roomCode);
     this.assertDirectMode(room);
     const video = await this.alist.getVideo(filePath);
-    room.currentVideo = video;
+    room.currentVideo = {
+      ...video,
+      playUrl: `/api/rooms/${room.roomCode}/video`
+    };
     room.currentSubtitle = null;
     room.playbackState = this.nextPlaybackState(room, {
       playing: false,
@@ -267,6 +270,21 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
 
   getCurrentSubtitle(roomCode: string): CurrentSubtitle | null {
     return this.getStoredRoom(roomCode).currentSubtitle;
+  }
+
+  /**
+   * 解析房间当前视频的真实播放地址，用于 HTTP 302 跳转。
+   *
+   * @param roomCode 房间码。
+   * @returns AList/OpenList 当前视频真实地址。
+   */
+  async resolveCurrentVideoUrl(roomCode: string): Promise<string> {
+    const room = this.getStoredRoom(roomCode);
+    this.assertDirectMode(room);
+    if (!room.currentVideo) {
+      throw new NotFoundException("房间尚未选择视频");
+    }
+    return this.alist.resolveFileUrl(room.currentVideo.filePath);
   }
 
   /**

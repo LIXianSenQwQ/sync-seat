@@ -48,6 +48,16 @@ export class SubtitleService {
   }
 
   /**
+   * 解析字幕真实访问地址，供已是 WebVTT 的字幕直接 302 跳转。
+   *
+   * @param filePath 字幕文件路径。
+   * @returns AList/OpenList 字幕真实地址。
+   */
+  async resolveSubtitleUrl(filePath: string): Promise<string> {
+    return this.alist.resolveFileUrl(filePath);
+  }
+
+  /**
    * 将 SRT 字幕转换成 WebVTT。
    *
    * @param content SRT 原文。

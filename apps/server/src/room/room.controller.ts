@@ -1,5 +1,6 @@
-import { Body, Controller, Get, Header, Param, Post } from "@nestjs/common";
+import { Body, Controller, Get, Param, Post, Res } from "@nestjs/common";
 import type { CreateRoomRequest, CreateRoomResponse, JoinRoomRequest, RoomState } from "@sync-seat/shared";
+import type { Response } from "express";
 import { SubtitleService } from "../drive/subtitle.service.js";
 import { RoomService } from "./room.service.js";
 
@@ -54,18 +55,36 @@ export class RoomController {
   }
 
   /**
+   * 跳转到房间当前视频的真实播放地址。
+   *
+   * @param roomCode 房间码。
+   * @param response Express 响应对象。
+   */
+  @Get(":roomCode/video")
+  async video(@Param("roomCode") roomCode: string, @Res() response: Response): Promise<void> {
+    const url = await this.rooms.resolveCurrentVideoUrl(roomCode);
+    response.redirect(302, url);
+  }
+
+  /**
    * 输出当前字幕的 WebVTT 内容。
    *
    * @param roomCode 房间码。
    * @returns WebVTT 字幕。
    */
   @Get(":roomCode/subtitle.vtt")
-  @Header("content-type", "text/vtt; charset=utf-8")
-  async subtitle(@Param("roomCode") roomCode: string): Promise<string> {
+  async subtitle(@Param("roomCode") roomCode: string, @Res() response: Response): Promise<void> {
     const subtitle = this.rooms.getCurrentSubtitle(roomCode);
     if (!subtitle) {
-      return "WEBVTT\n\n";
+      response.type("text/vtt; charset=utf-8").send("WEBVTT\n\n");
+      return;
     }
-    return this.subtitles.readAsVtt(subtitle.filePath);
+    if (subtitle.format === "vtt") {
+      const url = await this.subtitles.resolveSubtitleUrl(subtitle.filePath);
+      response.redirect(302, url);
+      return;
+    }
+    const content = await this.subtitles.readAsVtt(subtitle.filePath);
+    response.type("text/vtt; charset=utf-8").send(content);
   }
 }

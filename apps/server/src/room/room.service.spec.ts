@@ -12,7 +12,8 @@ const video: CurrentVideo = {
 function createService(): RoomService {
   return new RoomService(
     {
-      getVideo: vi.fn(async () => video)
+      getVideo: vi.fn(async () => video),
+      resolveFileUrl: vi.fn(async () => "https://alist.test/d/Movies/demo.mp4")
     } as never,
     {
       buildCurrentSubtitle: vi.fn((filePath: string, roomCode: string) => ({
@@ -144,9 +145,22 @@ describe("RoomService", () => {
     service.selectSubtitle(room.roomCode, "/Movies/demo.srt");
     const updated = await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
 
-    expect(updated.currentVideo).toEqual(video);
+    expect(updated.currentVideo).toEqual({
+      ...video,
+      playUrl: `/api/rooms/${room.roomCode}/video`
+    });
     expect(updated.currentSubtitle).toBeNull();
     expect(updated.playbackState.positionSeconds).toBe(0);
+  });
+
+  it("只为房间当前视频解析 302 跳转地址", async () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+
+    await expect(service.resolveCurrentVideoUrl(room.roomCode)).rejects.toThrow(NotFoundException);
+    await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
+
+    await expect(service.resolveCurrentVideoUrl(room.roomCode)).resolves.toBe("https://alist.test/d/Movies/demo.mp4");
   });
 
   it("房主推流模式拒绝网盘选片和字幕状态污染", async () => {
