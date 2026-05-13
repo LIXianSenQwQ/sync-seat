@@ -1,16 +1,24 @@
 node_modules/
+**/node_modules/
 dist/
+**/dist/
 coverage/
+
 .env
 .env.*
 !.env.example
-.DS_Store
-*.log
 
+.git/
+.github/
 .agents/
 .claude/
 .codex/
 .cursor/
 .trellis/
-AGENTS.md
 .ace-tool/
+
+*.log
+npm-debug.log*
+Dockerfile
+docker-compose.yml
+nginx.conf

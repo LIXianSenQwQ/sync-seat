@@ -1,6 +1,15 @@
 import "reflect-metadata";
+import { existsSync } from "node:fs";
+import { extname, join } from "node:path";
 import { NestFactory } from "@nestjs/core";
+import type { NestExpressApplication } from "@nestjs/platform-express";
+import type { NextFunction, Request, Response } from "express";
 import { AppModule } from "./app.module.js";
+
+/**
+ * 前端构建产物的默认路径，生产镜像会把 Vue dist 复制到这里。
+ */
+const defaultWebDistPath = join(process.cwd(), "apps/web/dist");
 
 /**
  * 启动后端服务。
@@ -8,8 +17,8 @@ import { AppModule } from "./app.module.js";
  * @author 清羽
  */
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule);
-  // 信任 Vite 代理转发的 X-Forwarded-For 头，以便获取客户端真实 IP
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  // 信任 Vite/Nginx 代理转发的 X-Forwarded-For 头，以便获取客户端真实 IP。
   app.getHttpAdapter().getInstance().set("trust proxy", 1);
   const origin = process.env.WEB_ORIGIN ?? "http://localhost:5173";
 
@@ -19,9 +28,66 @@ async function bootstrap(): Promise<void> {
     credentials: true
   });
 
-  // 步骤2：按环境变量启动端口，保持单机部署简单。
+  // 步骤2：生产镜像存在前端构建产物时，直接由 Nest 托管静态资源。
+  configureStaticAssets(app);
+
+  // 步骤3：按环境变量启动端口，保持单机部署简单。
   const port = Number(process.env.SERVER_PORT ?? 3000);
   await app.listen(port);
+}
+
+/**
+ * 在生产部署中托管 Vue 构建产物，并为 history 路由提供 index.html fallback。
+ *
+ * @param app Nest Express 应用实例。
+ */
+function configureStaticAssets(app: NestExpressApplication): void {
+  const webDistPath = process.env.WEB_DIST_PATH ?? defaultWebDistPath;
+  const indexFilePath = join(webDistPath, "index.html");
+
+  if (!existsSync(indexFilePath)) {
+    return;
+  }
+
+  app.useStaticAssets(webDistPath, {
+    index: false
+  });
+
+  app.use((request: Request, response: Response, next: NextFunction) => {
+    if (!shouldServeSpaFallback(request)) {
+      next();
+      return;
+    }
+
+    response.sendFile(indexFilePath);
+  });
+}
+
+/**
+ * 判断当前请求是否应回退到 Vue 单页应用入口。
+ *
+ * @param request Express 请求对象。
+ * @returns 仅页面导航请求返回 true，API、Socket.IO 和静态文件请求返回 false。
+ */
+function shouldServeSpaFallback(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return false;
+  }
+
+  if (request.path.startsWith("/api") || request.path.startsWith("/socket.io")) {
+    return false;
+  }
+
+  if (extname(request.path)) {
+    return false;
+  }
+
+  const acceptHeader = request.headers.accept;
+  if (Array.isArray(acceptHeader)) {
+    return acceptHeader.some((value) => value.includes("text/html"));
+  }
+
+  return typeof acceptHeader === "string" && acceptHeader.includes("text/html");
 }
 
 void bootstrap();

@@ -1,0 +1,64 @@
+services:
+  app:
+    image: ${SYNC_SEAT_IMAGE:-ghcr.io/your-github-user/sync-seat:latest}
+    container_name: sync-seat-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # 容器内应用监听端口，Nginx 通过服务名访问该端口。
+      SERVER_PORT: ${SERVER_PORT:-3000}
+      # 生产同源部署时应设置为 https://你的域名，供 CORS 和 Socket.IO 握手使用。
+      WEB_ORIGIN: ${WEB_ORIGIN:-https://example.com}
+      # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
+      WEB_DIST_PATH: /app/apps/web/dist
+    expose:
+      - "${SERVER_PORT:-3000}"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sync-seat-nginx
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - sync-seat-certs:/etc/nginx/certs:ro
+
+  acme:
+    image: neilpang/acme.sh:3.1.1
+    container_name: sync-seat-acme
+    profiles:
+      - cert
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # ACME_DNS_API 示例：dns_cf、dns_dp、dns_ali；对应密钥只放在本机 .env。
+      ACME_DNS_API: ${ACME_DNS_API:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      SYNC_SEAT_DOMAIN: ${SYNC_SEAT_DOMAIN:-}
+    volumes:
+      - sync-seat-acme:/acme.sh
+      - sync-seat-certs:/etc/nginx/certs
+    command: >
+      sh -c '
+        test -n "$${SYNC_SEAT_DOMAIN}" &&
+        test -n "$${ACME_EMAIL}" &&
+        test -n "$${ACME_DNS_API}" &&
+        acme.sh --set-default-ca --server letsencrypt &&
+        acme.sh --register-account -m "$${ACME_EMAIL}" &&
+        (acme.sh --issue --dns "$${ACME_DNS_API}" -d "$${SYNC_SEAT_DOMAIN}" --keylength ec-256 --home /acme.sh || true) &&
+        acme.sh --install-cert -d "$${SYNC_SEAT_DOMAIN}" --ecc
+          --fullchain-file /etc/nginx/certs/fullchain.cer
+          --key-file /etc/nginx/certs/private.key
+          --reloadcmd "echo cert-updated-reload-nginx" &&
+        crond -f
+      '
+
+volumes:
+  sync-seat-acme:
+  sync-seat-certs:
