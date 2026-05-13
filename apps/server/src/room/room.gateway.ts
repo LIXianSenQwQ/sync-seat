@@ -32,10 +32,6 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const binding = this.realtime.unbind(socket.id);
     if (!binding) return;
     const room = this.rooms.leaveRoom(binding.roomCode, binding.memberId);
-    if (room.watchMode === "host-stream" && room.ownerId === binding.memberId) {
-      this.server.to(this.realtime.roomName(binding.roomCode)).emit("room_event", { type: "room_closed", reason: "房主已离开，房主推流房间已关闭" });
-      return;
-    }
     this.server.to(this.realtime.roomName(binding.roomCode)).emit("room_event", this.realtime.stateEvent(room));
   }
 

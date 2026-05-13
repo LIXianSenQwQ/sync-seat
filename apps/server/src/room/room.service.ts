@@ -145,17 +145,16 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     member.connected = false;
     member.voiceJoined = false;
     member.muted = false;
-    if (room.watchMode === "host-stream" && room.ownerId === memberId) {
-      this.rooms.delete(room.roomCode);
-      return clonePublicRoom({
-        ...room,
-        members: room.members.map((item) => (item.memberId === memberId ? member : item)),
-        emptySince: now,
-        updatedAt: now
-      });
-    }
     if (room.ownerId === memberId) {
       room.ownerDisconnectedAt = now;
+      if (room.watchMode === "host-stream" && room.hostStreamState?.streaming) {
+        room.hostStreamState = {
+          ...room.hostStreamState,
+          streaming: false,
+          stoppedAt: now,
+          version: room.hostStreamState.version + 1
+        };
+      }
     }
     if (!room.members.some((item) => item.connected)) {
       room.emptySince = now;
@@ -173,8 +172,13 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
   sweep(nowMs = Date.now()): string[] {
     const removed: string[] = [];
     for (const [roomCode, room] of this.rooms) {
-      // 步骤1：房主离线超过保留窗口后，转让给最早在线成员。
+      // 步骤1：房主离线超过保留窗口后，直链房间转让房主，房主推流房间释放。
       if (room.ownerDisconnectedAt && nowMs - Date.parse(room.ownerDisconnectedAt) >= OWNER_GRACE_MS) {
+        if (room.watchMode === "host-stream") {
+          this.rooms.delete(roomCode);
+          removed.push(roomCode);
+          continue;
+        }
         const nextOwnerId = room.memberOrder.find((id) => room.members.some((m) => m.memberId === id && m.connected));
         if (nextOwnerId) {
           room.ownerId = nextOwnerId;

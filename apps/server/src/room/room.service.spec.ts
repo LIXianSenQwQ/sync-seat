@@ -83,14 +83,28 @@ describe("RoomService", () => {
     expect(service.getRoom(room.roomCode).ownerId).toBe("m2");
   });
 
-  it("房主推流房间在房主离开后直接关闭", () => {
+  it("房主推流房间在房主短暂断线时保留房间并停止推流", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A", undefined, "host-stream");
+    service.joinRoom(room.roomCode, "m2", "B");
+    service.startHostStream(room.roomCode, "m1", "local.mp4");
+
+    const left = service.leaveRoom(room.roomCode, "m1");
+
+    expect(left.members.find((member) => member.memberId === "m1")?.connected).toBe(false);
+    expect(left.hostStreamState).toMatchObject({ streaming: false, fileName: "local.mp4", version: 2 });
+    expect(service.getRoom(room.roomCode).roomCode).toBe(room.roomCode);
+  });
+
+  it("房主推流房间在房主断线超过保留窗口后关闭", () => {
     const service = createService();
     const room = service.createRoom("m1", "A", undefined, "host-stream");
     service.joinRoom(room.roomCode, "m2", "B");
 
     const left = service.leaveRoom(room.roomCode, "m1");
+    const removed = service.sweep(Date.parse(left.updatedAt) + 60_000);
 
-    expect(left.emptySince).not.toBeNull();
+    expect(removed).toEqual([room.roomCode]);
     expect(() => service.getRoom(room.roomCode)).toThrow(NotFoundException);
   });
 
