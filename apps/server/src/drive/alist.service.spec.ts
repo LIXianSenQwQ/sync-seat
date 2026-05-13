@@ -19,6 +19,33 @@ describe("AlistService", () => {
     expect(() => service.assertAllowedPath("/Private/demo.mp4")).toThrow(ForbiddenException);
   });
 
+  it("未配置白名单时允许浏览 OpenList 根目录", async () => {
+    class OpenRootEnv extends TestEnv {
+      override readonly allowedRootPaths = [];
+    }
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValueOnce(alistResponse({ content: [{ name: "Movies", is_dir: true }] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new AlistService(new OpenRootEnv());
+    const entries = await service.listDirectory("/");
+
+    expect(entries).toEqual([
+      {
+        name: "Movies",
+        path: "/Movies",
+        type: "directory",
+        size: undefined,
+        modifiedAt: undefined
+      }
+    ]);
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "https://alist.test/api/fs/list", expect.objectContaining({
+      body: JSON.stringify({ path: "/", password: "", page: 1, per_page: 0, refresh: false })
+    }));
+    vi.unstubAllGlobals();
+  });
+
   it("根目录返回白名单虚拟目录，避免直接访问 OpenList 根目录被白名单拦截", async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

@@ -148,9 +148,9 @@ export class AlistService {
     const safePath = normalizePath(path);
     const roots = this.env.allowedRootPaths;
     if (roots.length === 0) {
-      throw new ForbiddenException("未配置允许访问的网盘根目录");
+      return safePath;
     }
-    const allowed = roots.some((root) => safePath === root || safePath.startsWith(`${root}/`));
+    const allowed = this.isAllowedPath(safePath);
     if (!allowed) {
       throw new ForbiddenException("路径不在允许访问的网盘目录内");
     }
@@ -159,7 +159,7 @@ export class AlistService {
 
   private listVirtualAllowedRoots(path: string): DriveEntry[] | null {
     const roots = this.env.allowedRootPaths;
-    if (roots.includes("/") || this.isAllowedPath(path)) {
+    if (roots.length === 0 || roots.includes("/") || this.isAllowedPath(path)) {
       return null;
     }
 

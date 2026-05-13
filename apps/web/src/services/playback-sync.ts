@@ -18,8 +18,9 @@ export function targetPosition(state: PlaybackState, nowMs = Date.now()): number
  *
  * @param video HTML5 video 元素。
  * @param state 服务端权威播放状态。
+ * @returns 播放动作的 Promise，用于让调用方处理浏览器自动播放拦截。
  */
-export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState): void {
+export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState): Promise<void> {
   const target = targetPosition(state);
   const drift = target - video.currentTime;
   video.playbackRate = state.playbackRate;
@@ -33,9 +34,10 @@ export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState
 
   // 步骤2：播放/暂停以服务端状态为准。
   if (state.playing && video.paused) {
-    void video.play().catch(() => undefined);
+    return video.play().then(() => undefined);
   }
   if (!state.playing && !video.paused) {
     video.pause();
   }
+  return Promise.resolve();
 }

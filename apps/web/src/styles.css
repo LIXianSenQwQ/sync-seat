@@ -297,6 +297,7 @@ input:focus {
 }
 
 .player-panel {
+  position: relative;
   min-height: 72vh;
   border-radius: 8px;
   overflow: hidden;
@@ -329,6 +330,23 @@ input:focus {
   display: grid;
   place-items: center;
   color: #9fb1bf;
+}
+
+.play-unlock {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  background: rgba(5, 6, 7, 0.72);
+  color: #d9e5ed;
+  text-align: center;
+}
+
+.play-unlock .primary {
+  margin-top: 0;
 }
 
 .room-side {

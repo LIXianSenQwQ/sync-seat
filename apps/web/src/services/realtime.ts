@@ -12,6 +12,7 @@ export class RoomSocket {
   connect(
     roomCode: string,
     memberId: string,
+    nickname: string,
     onState: (room: RoomState) => void,
     onVoiceSignal: (event: Extract<ServerRoomEvent, { type: "voice_signal" }>) => void,
     onHostStreamSignal: (event: Extract<ServerRoomEvent, { type: "host_stream_signal" }>) => void,
@@ -25,7 +26,7 @@ export class RoomSocket {
 
     // 步骤1：连接成功后显式加入房间实时通道。
     this.socket.on("connect", () => {
-      this.socket?.emit("join_room", { roomCode, memberId });
+      this.socket?.emit("join_room", { roomCode, memberId, nickname });
     });
 
     // 步骤2：统一处理服务端房间事件。

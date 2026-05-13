@@ -129,6 +129,34 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * 恢复已有成员的实时连接，供 WebSocket 自动重连使用。
+   *
+   * @param roomCode 房间码。
+   * @param memberId 成员标识。
+   * @param nickname 可选昵称；为空时保留原昵称。
+   * @returns 恢复后的房间状态。
+   */
+  reconnectMember(roomCode: string, memberId: string, nickname?: string): RoomState {
+    const room = this.getStoredRoom(roomCode);
+    const existing = room.members.find((member) => member.memberId === memberId);
+    if (!existing) {
+      throw new ForbiddenException("请先通过 REST API 加入房间");
+    }
+
+    // 步骤1：WS 自动重连只恢复已有身份，不重新校验密码，也不新增成员。
+    existing.connected = true;
+    if (nickname) {
+      existing.nickname = this.normalizeNickname(nickname);
+    }
+    room.emptySince = null;
+    if (room.ownerId === memberId) {
+      room.ownerDisconnectedAt = null;
+    }
+    this.touch(room);
+    return clonePublicRoom(room);
+  }
+
+  /**
    * 标记成员离线，并触发房主保留或空房计时。
    *
    * @param roomCode 房间码。

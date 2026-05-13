@@ -6,7 +6,7 @@ import { api } from "../services/api";
 import { HostStreamMesh, type HostStreamQuality } from "../services/host-stream";
 import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { getIdentity } from "../services/identity";
-import { applyPlaybackState } from "../services/playback-sync";
+import { applyPlaybackState, targetPosition } from "../services/playback-sync";
 import { RoomSocket } from "../services/realtime";
 import { VoiceMesh } from "../services/voice";
 
@@ -29,13 +29,25 @@ const voice = ref<VoiceMesh | null>(null);
 const voiceJoined = ref(false);
 const muted = ref(false);
 const volume = ref(1);
-const applyingRemote = ref(false);
+const localSeeking = ref(false);
 const hostStream = shallowRef<HostStreamMesh | null>(null);
+const remotePlayBlocked = ref(false);
 /** 防止 ensureHostStream 并发调用时创建多个 HostStreamMesh 实例 */
 let hostStreamPromise: Promise<HostStreamMesh> | null = null;
 /** 服务端返回的客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏 */
 let clientIp = "";
 let clientIpPromise: Promise<string> | null = null;
+let pauseSendTimer: number | null = null;
+let localPlaybackGuardUntil = 0;
+let wasPlayingBeforeSeek = false;
+let suppressNextPlayEvent = false;
+let suppressRemotePlayEvent = false;
+let suppressRemotePauseEvent = false;
+let suppressRemoteRateEvent = false;
+let suppressRemoteSeekEvent = false;
+let remoteSeekInProgress = false;
+let remoteSeekTarget: number | null = null;
+let lastAppliedPlaybackVersion = -1;
 const localVideoUrl = ref("");
 const localVideoName = ref("");
 const remoteStreamReady = ref(false);
@@ -45,6 +57,7 @@ const voiceIceState = ref<Record<string, RTCIceConnectionState>>({});
 const hostStreamQuality = ref<HostStreamQuality>("original");
 const voiceJoining = ref(false);
 let calibrationTimer: number | null = null;
+let roomRefreshTimer: number | null = null;
 
 const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
   { label: "原画", value: "original" },
@@ -110,17 +123,14 @@ function connectSocket(): void {
   socket.connect(
     roomCode.value,
     identity.memberId,
+    identity.nickname,
     async (nextRoom) => {
-      const previousVersion = room.value?.playbackState.version ?? -1;
       room.value = nextRoom;
       connected.value = true;
       await nextTick();
-      if (nextRoom.watchMode === "direct" && videoRef.value && nextRoom.playbackState.version >= previousVersion) {
-        applyingRemote.value = true;
-        applyPlaybackState(videoRef.value, nextRoom.playbackState);
-        window.setTimeout(() => {
-          applyingRemote.value = false;
-        }, 120);
+      if (nextRoom.watchMode === "direct" && videoRef.value && nextRoom.playbackState.version > lastAppliedPlaybackVersion) {
+        lastAppliedPlaybackVersion = nextRoom.playbackState.version;
+        applyRemotePlaybackState(videoRef.value, nextRoom.playbackState);
       }
       if (nextRoom.currentVideo) {
         subtitles.value = await api.listSubtitles(nextRoom.currentVideo.filePath).catch(() => []);
@@ -154,6 +164,15 @@ function connectSocket(): void {
   );
 }
 
+async function refreshRoomState(): Promise<void> {
+  if (!room.value) return;
+  try {
+    room.value = await api.getRoom(roomCode.value);
+  } catch {
+    // 步骤1：兜底刷新只用于补齐断线状态，失败时保留当前 WebSocket 状态。
+  }
+}
+
 async function loadDirectory(path: string): Promise<void> {
   currentPath.value = path;
   entries.value = await api.listDrive(path);
@@ -161,6 +180,63 @@ async function loadDirectory(path: string): Promise<void> {
 
 function send(event: ClientRoomEvent): void {
   socket.send(event);
+}
+
+function guardLocalPlayback(durationMs = 1800): void {
+  localPlaybackGuardUntil = Date.now() + durationMs;
+}
+
+function isAutoplayBlocked(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "NotAllowedError";
+}
+
+function applyRemotePlaybackState(video: HTMLVideoElement, playbackState: RoomState["playbackState"]): void {
+  if (!playbackState.playing) {
+    remotePlayBlocked.value = false;
+  }
+  const target = targetPosition(playbackState);
+  if (Math.abs(target - video.currentTime) >= 1) {
+    remoteSeekTarget = target;
+    suppressRemoteSeekEvent = true;
+  }
+  suppressRemoteRateEvent = true;
+  suppressRemotePlayEvent = playbackState.playing && video.paused;
+  suppressRemotePauseEvent = !playbackState.playing && !video.paused;
+  void applyPlaybackState(video, playbackState)
+    .then(() => {
+      if (playbackState.playing) {
+        remotePlayBlocked.value = false;
+      }
+    })
+    .catch((err) => {
+      // 步骤1：浏览器会拦截非用户手势触发的有声视频播放，此时提示用户点一次继续同步。
+      if (playbackState.playing && isAutoplayBlocked(err)) {
+        remotePlayBlocked.value = true;
+        return;
+      }
+      console.warn("[PlaybackSync] 应用远端播放状态失败:", err);
+    });
+  window.setTimeout(() => {
+    suppressRemotePlayEvent = false;
+    suppressRemotePauseEvent = false;
+    suppressRemoteRateEvent = false;
+    suppressRemoteSeekEvent = false;
+    remoteSeekInProgress = false;
+    remoteSeekTarget = null;
+  }, 1200);
+}
+
+function resumeRemotePlayback(): void {
+  if (!videoRef.value || !room.value) return;
+  remotePlayBlocked.value = false;
+  applyRemotePlaybackState(videoRef.value, room.value.playbackState);
+}
+
+function clearPendingPause(): void {
+  if (pauseSendTimer) {
+    window.clearTimeout(pauseSendTimer);
+    pauseSendTimer = null;
+  }
 }
 
 function loadVideo(path: string): void {
@@ -172,22 +248,93 @@ function selectSubtitle(path: string | null): void {
 }
 
 function onPlay(): void {
-  if (applyingRemote.value || !videoRef.value) return;
+  if (!videoRef.value) return;
+  if (suppressRemotePlayEvent) {
+    suppressRemotePlayEvent = false;
+    return;
+  }
+  remotePlayBlocked.value = false;
+  if (suppressNextPlayEvent) {
+    suppressNextPlayEvent = false;
+    return;
+  }
+  clearPendingPause();
+  guardLocalPlayback();
+  if (room.value?.playbackState.playing) {
+    applyRemotePlaybackState(videoRef.value, room.value.playbackState);
+    return;
+  }
   send({ type: "play", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
 }
 
 function onPause(): void {
-  if (applyingRemote.value || !videoRef.value) return;
-  send({ type: "pause", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
+  if (!videoRef.value) return;
+  if (suppressRemotePauseEvent) {
+    suppressRemotePauseEvent = false;
+    return;
+  }
+  remotePlayBlocked.value = false;
+  if (localSeeking.value || videoRef.value.seeking) return;
+  guardLocalPlayback();
+  clearPendingPause();
+  pauseSendTimer = window.setTimeout(() => {
+    pauseSendTimer = null;
+    if (!videoRef.value || localSeeking.value || videoRef.value.seeking || !videoRef.value.paused) return;
+    send({ type: "pause", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
+  }, 180);
+}
+
+function onSeeking(): void {
+  if (!videoRef.value) return;
+  if (suppressRemoteSeekEvent && remoteSeekTarget !== null && Math.abs(videoRef.value.currentTime - remoteSeekTarget) < 0.75) {
+    suppressRemoteSeekEvent = false;
+    remoteSeekInProgress = true;
+    return;
+  }
+  clearPendingPause();
+  // 步骤1：记录拖动前的播放意图，避免原生控件 seek 时的临时暂停污染房间状态。
+  wasPlayingBeforeSeek = !videoRef.value.paused || (room.value?.playbackState.playing ?? false);
+  localSeeking.value = true;
+  guardLocalPlayback(2500);
 }
 
 function onSeeked(): void {
-  if (applyingRemote.value || !videoRef.value) return;
-  send({ type: "seek", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
+  if (!videoRef.value) return;
+  if (remoteSeekInProgress && remoteSeekTarget !== null && Math.abs(videoRef.value.currentTime - remoteSeekTarget) < 0.75) {
+    remoteSeekInProgress = false;
+    remoteSeekTarget = null;
+    localSeeking.value = false;
+    wasPlayingBeforeSeek = false;
+    return;
+  }
+
+  const positionSeconds = videoRef.value.currentTime;
+  const shouldResume = wasPlayingBeforeSeek;
+  localSeeking.value = false;
+  wasPlayingBeforeSeek = false;
+  remoteSeekTarget = null;
+  guardLocalPlayback(2500);
+
+  // 步骤2：拖动前处于播放中时，seek 完成后广播 play，覆盖原生控件产生的临时 pause。
+  if (shouldResume) {
+    suppressNextPlayEvent = true;
+    window.setTimeout(() => {
+      suppressNextPlayEvent = false;
+    }, 500);
+    void videoRef.value.play().catch(() => undefined);
+    send({ type: "play", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds });
+    return;
+  }
+  send({ type: "seek", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds });
 }
 
 function onRateChange(): void {
-  if (applyingRemote.value || !videoRef.value) return;
+  if (!videoRef.value) return;
+  if (suppressRemoteRateEvent) {
+    suppressRemoteRateEvent = false;
+    return;
+  }
+  guardLocalPlayback();
   send({
     type: "playback_rate_change",
     roomCode: roomCode.value,
@@ -418,13 +565,19 @@ onMounted(async () => {
   }
   calibrationTimer = window.setInterval(() => {
     if (videoRef.value && room.value) {
-      applyPlaybackState(videoRef.value, room.value.playbackState);
+      if (localSeeking.value || Date.now() < localPlaybackGuardUntil) return;
+      applyRemotePlaybackState(videoRef.value, room.value.playbackState);
     }
+  }, 5000);
+  roomRefreshTimer = window.setInterval(() => {
+    void refreshRoomState();
   }, 5000);
 });
 
 onBeforeUnmount(() => {
   if (calibrationTimer) window.clearInterval(calibrationTimer);
+  if (roomRefreshTimer) window.clearInterval(roomRefreshTimer);
+  clearPendingPause();
   socket.close();
   voice.value?.leave();
   hostStream.value?.stop();
@@ -461,26 +614,32 @@ onBeforeUnmount(() => {
 
     <section v-else class="watch-layout">
       <section class="player-panel">
-        <video
-          v-if="isDirectMode && room.currentVideo"
-          ref="videoRef"
-          class="video-player"
-          controls
-          :src="room.currentVideo.playUrl"
-          @play="onPlay"
-          @pause="onPause"
-          @seeked="onSeeked"
-          @ratechange="onRateChange"
-        >
-          <track
-            v-if="room.currentSubtitle"
-            kind="subtitles"
-            srclang="zh"
-            label="房间字幕"
-            default
-            :src="room.currentSubtitle.trackUrl"
-          />
-        </video>
+        <template v-if="isDirectMode && room.currentVideo">
+          <video
+            ref="videoRef"
+            class="video-player"
+            controls
+            :src="room.currentVideo.playUrl"
+            @play="onPlay"
+            @pause="onPause"
+            @seeking="onSeeking"
+            @seeked="onSeeked"
+            @ratechange="onRateChange"
+          >
+            <track
+              v-if="room.currentSubtitle"
+              kind="subtitles"
+              srclang="zh"
+              label="房间字幕"
+              default
+              :src="room.currentSubtitle.trackUrl"
+            />
+          </video>
+          <div v-if="remotePlayBlocked" class="play-unlock">
+            <button class="primary" type="button" @click="resumeRemotePlayback">继续同步播放</button>
+            <span>浏览器已拦截自动播放，点击一次后会继续跟随房间进度</span>
+          </div>
+        </template>
 
         <div v-else-if="isHostStreamMode && isOwner" class="host-player">
           <video ref="hostVideoRef" class="video-player" controls :src="localVideoUrl" />

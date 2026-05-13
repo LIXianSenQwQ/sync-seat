@@ -31,6 +31,9 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   handleDisconnect(socket: Socket): void {
     const binding = this.realtime.unbind(socket.id);
     if (!binding) return;
+    if (this.realtime.targetSocketIds(binding.roomCode, binding.memberId).length > 0) {
+      return;
+    }
     const room = this.rooms.leaveRoom(binding.roomCode, binding.memberId);
     this.server.to(this.realtime.roomName(binding.roomCode)).emit("room_event", this.realtime.stateEvent(room));
   }
@@ -42,16 +45,19 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * @param socket 当前连接。
    */
   @SubscribeMessage("join_room")
-  async joinRoom(@MessageBody() body: { roomCode: string; memberId: string }, @ConnectedSocket() socket: Socket): Promise<void> {
+  async joinRoom(@MessageBody() body: { roomCode: string; memberId: string; nickname?: string }, @ConnectedSocket() socket: Socket): Promise<void> {
     const roomCode = body.roomCode.toUpperCase();
-    const room = this.rooms.getRoom(roomCode);
-    if (!room.members.some((member) => member.memberId === body.memberId && member.connected)) {
+    const existingRoom = this.rooms.getRoom(roomCode);
+    if (!existingRoom.members.some((member) => member.memberId === body.memberId)) {
       socket.emit("room_event", { type: "room_error", message: "请先通过 REST API 加入房间" });
       return;
     }
+    const room = this.rooms.reconnectMember(roomCode, body.memberId, body.nickname);
     this.realtime.bind(socket.id, roomCode, body.memberId);
-    await socket.join(this.realtime.roomName(roomCode));
-    socket.emit("room_event", this.realtime.stateEvent(room));
+    const roomName = this.realtime.roomName(roomCode);
+    await socket.join(roomName);
+    // 步骤1：成员实时通道就绪后向整个房间广播，确保成员列表不依赖下一次播放/语音事件才刷新。
+    this.broadcastState(roomName, room);
   }
 
   /**

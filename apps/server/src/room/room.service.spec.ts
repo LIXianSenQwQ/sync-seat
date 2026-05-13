@@ -81,6 +81,19 @@ describe("RoomService", () => {
     expect(joined.room.members[0]?.connected).toBe(true);
   });
 
+  it("实时通道重连会恢复已有成员并取消空房释放计时", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.leaveRoom(room.roomCode, "m1");
+
+    const reconnected = service.reconnectMember(room.roomCode, "m1", "A2");
+
+    expect(reconnected.emptySince).toBeNull();
+    expect(reconnected.members).toHaveLength(1);
+    expect(reconnected.members[0]).toMatchObject({ memberId: "m1", nickname: "A2", connected: true });
+    expect(service.sweep(Date.parse(reconnected.updatedAt) + 60_000)).toEqual([]);
+  });
+
   it("房主离线 60 秒后按进入顺序自动转让", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
@@ -91,6 +104,22 @@ describe("RoomService", () => {
     service.sweep(disconnectedAt + 60_000);
 
     expect(service.getRoom(room.roomCode).ownerId).toBe("m2");
+  });
+
+  it("普通成员离线后仍保留在公开成员列表中", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.joinRoom(room.roomCode, "m2", "B");
+
+    const left = service.leaveRoom(room.roomCode, "m2");
+
+    expect(left.members).toHaveLength(2);
+    expect(left.members.find((member) => member.memberId === "m2")).toMatchObject({
+      nickname: "B",
+      connected: false,
+      voiceJoined: false,
+      muted: false
+    });
   });
 
   it("房主推流房间在房主短暂断线时保留房间并停止推流", () => {
