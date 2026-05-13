@@ -24,7 +24,7 @@ services:
       - "3000"
 
   nginx:
-    image: nginx:alpine
+    image: docker.1panel.live/nginx:alpine
     container_name: sync-seat-nginx
     restart: unless-stopped
     depends_on:
@@ -48,7 +48,7 @@ services:
         exec nginx -g "daemon off;"
 
   acme:
-    image: neilpang/acme.sh:latest
+    image: docker.1panel.live/neilpang/acme.sh:latest
     container_name: sync-seat-acme
     restart: unless-stopped
     environment:
@@ -70,20 +70,20 @@ services:
         fi
 
         issue_cert() {
-          domain="$1"
-          if [ -z "$domain" ]; then
+          domain="$$1"
+          if [ -z "$$domain" ]; then
             return 0
           fi
 
           if [ ! -f "/acme.sh/fullchain.cer" ] || [ ! -f "/acme.sh/private.key" ]; then
-            echo "[Init] 为 ${domain} 申请证书..."
-            /usr/local/bin/acme.sh --issue --dns dns_ali -d "${domain}" --server letsencrypt
+            echo "[Init] 为 $${domain} 申请证书..."
+            /usr/local/bin/acme.sh --issue --dns dns_ali -d "$${domain}" --server letsencrypt
           else
-            echo "[Init] ${domain} 证书已存在，跳过首次签发。"
+            echo "[Init] $${domain} 证书已存在，跳过首次签发。"
           fi
 
-          echo "[Init] 安装 ${domain} 证书并配置 Nginx 重载钩子..."
-          /usr/local/bin/acme.sh --install-cert -d "${domain}" \
+          echo "[Init] 安装 $${domain} 证书并配置 Nginx 重载钩子..."
+          /usr/local/bin/acme.sh --install-cert -d "$${domain}" \
             --key-file       /acme.sh/private.key \
             --fullchain-file /acme.sh/fullchain.cer \
             --reloadcmd      "docker exec sync-seat-nginx nginx -s reload || true"
@@ -98,7 +98,7 @@ services:
         done
 
   turn:
-    image: coturn/coturn:latest
+    image: docker.1panel.live/coturn/coturn:latest
     container_name: sync-seat-turn
     restart: unless-stopped
     # TURN 不是 HTTP 服务，不经过 nginx；宿主机需放行 3478/tcp、3478/udp 和 49160-49200/udp。
