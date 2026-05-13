@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import winston from "winston";
 import DailyRotateFile from "winston-daily-rotate-file";
@@ -70,10 +70,7 @@ function createAppLogger(): winston.Logger {
   }
 
   loadLogEnvironmentFromRepo();
-  const logDir = resolve(process.env.LOG_DIR ?? "logs");
-  if (!existsSync(logDir)) {
-    mkdirSync(logDir, { recursive: true });
-  }
+  const logDir = resolve(process.env.LOG_DIR ?? defaultLogDir());
 
   const jsonFormat = winston.format.combine(
     winston.format.timestamp(),
@@ -81,28 +78,84 @@ function createAppLogger(): winston.Logger {
     winston.format.printf((info) => `${JSON.stringify(info)}`)
   );
 
+  const transports: winston.transport[] = [new winston.transports.Console()];
+  const fileTransports = createFileTransports(logDir);
+  transports.push(...fileTransports);
+
+  if (fileTransports.length === 0) {
+    console.warn(`[Logger] 日志目录不可写，已降级为仅控制台输出: ${logDir}`);
+  }
+
   return winston.createLogger({
     level: process.env.LOG_LEVEL ?? "info",
     format: jsonFormat,
-    transports: [
-      new winston.transports.Console(),
-      new DailyRotateFile({
-        dirname: logDir,
-        filename: "app-%DATE%.log",
-        datePattern: "YYYY-MM-DD",
-        maxFiles: process.env.LOG_RETENTION_DAYS ?? "14d",
-        maxSize: process.env.LOG_MAX_FILE_SIZE ?? "20m"
-      }),
-      new DailyRotateFile({
-        dirname: logDir,
-        filename: "error-%DATE%.log",
-        datePattern: "YYYY-MM-DD",
-        level: "error",
-        maxFiles: process.env.LOG_RETENTION_DAYS ?? "14d",
-        maxSize: process.env.LOG_MAX_FILE_SIZE ?? "20m"
-      })
-    ]
+    transports
   });
+}
+
+/**
+ * 选择生产容器中默认可写的日志目录。
+ *
+ * @returns 默认日志目录。
+ */
+function defaultLogDir(): string {
+  return process.env.NODE_ENV === "production" ? "/app/logs" : "logs";
+}
+
+/**
+ * 创建文件日志输出，目录不可写时返回空数组避免服务启动失败。
+ *
+ * @param logDir 日志目录。
+ * @returns 可用的文件日志 transport。
+ */
+function createFileTransports(logDir: string): winston.transport[] {
+  try {
+    // 步骤1：启动时先确保目录存在并可写，防止 Winston transport 初始化阶段抛出权限异常。
+    if (!existsSync(logDir)) {
+      mkdirSync(logDir, { recursive: true });
+    }
+    if (!statSync(logDir).isDirectory()) {
+      return [];
+    }
+    accessSync(logDir, constants.W_OK);
+    const transports = [
+      withTransportErrorHandler(
+        new DailyRotateFile({
+          dirname: logDir,
+          filename: "app-%DATE%.log",
+          datePattern: "YYYY-MM-DD",
+          maxFiles: process.env.LOG_RETENTION_DAYS ?? "14d",
+          maxSize: process.env.LOG_MAX_FILE_SIZE ?? "20m"
+        })
+      ),
+      withTransportErrorHandler(
+        new DailyRotateFile({
+          dirname: logDir,
+          filename: "error-%DATE%.log",
+          datePattern: "YYYY-MM-DD",
+          level: "error",
+          maxFiles: process.env.LOG_RETENTION_DAYS ?? "14d",
+          maxSize: process.env.LOG_MAX_FILE_SIZE ?? "20m"
+        })
+      )
+    ];
+    return transports;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 给文件日志 transport 绑定错误处理，避免运行期文件系统异常导致进程退出。
+ *
+ * @param transport 文件日志输出。
+ * @returns 已绑定错误处理的 transport。
+ */
+function withTransportErrorHandler(transport: DailyRotateFile): DailyRotateFile {
+  transport.on("error", (error) => {
+    console.warn(`[Logger] 文件日志写入异常，已保留控制台日志: ${error.message}`);
+  });
+  return transport;
 }
 
 /**

@@ -25,6 +25,7 @@ FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 ENV SERVER_PORT=3000
 ENV WEB_DIST_PATH=/app/apps/web/dist
+ENV LOG_DIR=/app/logs
 
 WORKDIR /app
 
@@ -39,6 +40,9 @@ RUN npm ci --omit=dev --workspace @sync-seat/server --workspace @sync-seat/share
 COPY --from=build /app/apps/server/dist apps/server/dist
 COPY --from=build /app/apps/web/dist apps/web/dist
 COPY --from=build /app/packages/shared/dist packages/shared/dist
+
+RUN mkdir -p /app/logs \
+  && chown -R node:node /app/logs
 
 USER node
 
