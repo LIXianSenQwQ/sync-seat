@@ -16,7 +16,7 @@ services:
       - "${SERVER_PORT:-3000}"
 
   nginx:
-    image: nginx:1.27-alpine
+    image: nginx:alpine
     container_name: sync-seat-nginx
     restart: unless-stopped
     depends_on:
@@ -26,39 +26,49 @@ services:
       - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - sync-seat-certs:/etc/nginx/certs:ro
+      - ./letsencrypt:/etc/nginx/certs:ro
 
   acme:
-    image: neilpang/acme.sh:3.1.1
+    image: neilpang/acme.sh:latest
     container_name: sync-seat-acme
-    profiles:
-      - cert
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      # ACME_DNS_API 示例：dns_cf、dns_dp、dns_ali；对应密钥只放在本机 .env。
-      ACME_DNS_API: ${ACME_DNS_API:-}
-      ACME_EMAIL: ${ACME_EMAIL:-}
-      SYNC_SEAT_DOMAIN: ${SYNC_SEAT_DOMAIN:-}
+      - Ali_Key=${Ali_Key:-your-ali-key}
+      - Ali_Secret=${Ali_Secret:-your-ali-secret}
+      - TARGET_DOMAIN=${TARGET_DOMAIN:-xxx.91since.com}
     volumes:
-      - sync-seat-acme:/acme.sh
-      - sync-seat-certs:/etc/nginx/certs
-    command: >
-      sh -c '
-        test -n "$${SYNC_SEAT_DOMAIN}" &&
-        test -n "$${ACME_EMAIL}" &&
-        test -n "$${ACME_DNS_API}" &&
-        acme.sh --set-default-ca --server letsencrypt &&
-        acme.sh --register-account -m "$${ACME_EMAIL}" &&
-        (acme.sh --issue --dns "$${ACME_DNS_API}" -d "$${SYNC_SEAT_DOMAIN}" --keylength ec-256 --home /acme.sh || true) &&
-        acme.sh --install-cert -d "$${SYNC_SEAT_DOMAIN}" --ecc
-          --fullchain-file /etc/nginx/certs/fullchain.cer
-          --key-file /etc/nginx/certs/private.key
-          --reloadcmd "echo cert-updated-reload-nginx" &&
-        crond -f
-      '
+      - ./letsencrypt:/acme.sh
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        set -eu
+        apk add --no-cache docker-cli
 
-volumes:
-  sync-seat-acme:
-  sync-seat-certs:
+        issue_cert() {
+          domain="$1"
+          if [ -z "$domain" ]; then
+            return 0
+          fi
+
+          if [ ! -f "/acme.sh/fullchain.cer" ]; then
+            echo "[Init] 为 ${domain} 申请证书..."
+            /usr/local/bin/acme.sh --issue --dns dns_ali -d "${domain}" --server letsencrypt
+
+            echo "[Init] 安装 ${domain} 证书并配置 Nginx 重载钩子..."
+            /usr/local/bin/acme.sh --install-cert -d "${domain}" \
+              --key-file       /acme.sh/private.key \
+              --fullchain-file /acme.sh/fullchain.cer \
+              --reloadcmd      "docker exec sync-seat-nginx nginx -s reload"
+          else
+            echo "[Init] ${domain} 证书已存在，跳过首次签发。"
+          fi
+        }
+
+        issue_cert "$${TARGET_DOMAIN}"
+
+        echo "[Init] 启动 cron 守护进程..."
+        exec crond -f

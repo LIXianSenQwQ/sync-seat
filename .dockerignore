@@ -19,6 +19,7 @@ coverage/
 
 *.log
 npm-debug.log*
+letsencrypt/
 Dockerfile
 docker-compose.yml
 nginx.conf
