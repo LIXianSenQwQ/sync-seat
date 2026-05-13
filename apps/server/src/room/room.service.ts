@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeE
 import { PLAYBACK_RATE_OPTIONS, type CurrentSubtitle, type HostStreamState, type PlaybackState, type RoomState, type WatchMode } from "@sync-seat/shared";
 import { AlistService } from "../drive/alist.service.js";
 import { SubtitleService } from "../drive/subtitle.service.js";
+import { logInfo, logWarn } from "../logging/app-logger.js";
 import { clonePublicRoom, type JoinResult, type StoredRoom } from "./room.types.js";
 
 const MAX_MEMBERS = 3;
@@ -80,6 +81,12 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       memberOrder: [memberId]
     };
     this.rooms.set(roomCode, room);
+    logInfo("RoomService", "创建房间", {
+      roomCode,
+      memberId,
+      watchMode: normalizedMode,
+      hasPassword: Boolean(password)
+    });
     return clonePublicRoom(room);
   }
 
@@ -106,6 +113,11 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
         room.ownerDisconnectedAt = null;
       }
       this.touch(room);
+      logInfo("RoomService", "成员通过 REST 重连房间", {
+        roomCode: room.roomCode,
+        memberId,
+        connectedMembers: room.members.filter((member) => member.connected).length
+      });
       return { room: clonePublicRoom(room), reconnected: true };
     }
 
@@ -125,6 +137,11 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     room.memberOrder.push(memberId);
     room.emptySince = null;
     this.touch(room);
+    logInfo("RoomService", "成员加入房间", {
+      roomCode: room.roomCode,
+      memberId,
+      connectedMembers: room.members.filter((member) => member.connected).length
+    });
     return { room: clonePublicRoom(room), reconnected: false };
   }
 
@@ -153,6 +170,11 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       room.ownerDisconnectedAt = null;
     }
     this.touch(room);
+    logInfo("RoomService", "成员通过 WebSocket 恢复连接", {
+      roomCode: room.roomCode,
+      memberId,
+      connectedMembers: room.members.filter((member) => member.connected).length
+    });
     return clonePublicRoom(room);
   }
 
@@ -189,6 +211,13 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       room.emptySince = now;
     }
     this.touch(room);
+    logInfo("RoomService", "成员离开房间", {
+      roomCode: room.roomCode,
+      memberId,
+      ownerId: room.ownerId,
+      connectedMembers: room.members.filter((item) => item.connected).length,
+      emptySince: room.emptySince
+    });
     return clonePublicRoom(room);
   }
 
@@ -206,6 +235,7 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
         if (room.watchMode === "host-stream") {
           this.rooms.delete(roomCode);
           removed.push(roomCode);
+          logWarn("RoomService", "房主推流房间因房主离线超时释放", { roomCode });
           continue;
         }
         const nextOwnerId = room.memberOrder.find((id) => room.members.some((m) => m.memberId === id && m.connected));
@@ -213,6 +243,10 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
           room.ownerId = nextOwnerId;
           room.ownerDisconnectedAt = null;
           this.touch(room);
+          logInfo("RoomService", "房主离线超时后转让房主", {
+            roomCode,
+            nextOwnerId
+          });
         }
       }
 
@@ -220,6 +254,7 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       if (room.emptySince && nowMs - Date.parse(room.emptySince) >= EMPTY_ROOM_TTL_MS) {
         this.rooms.delete(roomCode);
         removed.push(roomCode);
+        logInfo("RoomService", "空房间超时释放", { roomCode });
       }
     }
     return removed;
@@ -251,6 +286,12 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       playbackRate: 1
     });
     this.touch(room);
+    logInfo("RoomService", "房间加载视频", {
+      roomCode: room.roomCode,
+      filePath: video.filePath,
+      fileName: video.fileName,
+      size: video.size
+    });
     return clonePublicRoom(room);
   }
 
@@ -266,6 +307,11 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     this.assertDirectMode(room);
     room.currentSubtitle = filePath ? this.subtitleService.buildCurrentSubtitle(filePath, roomCode) : null;
     this.touch(room);
+    logInfo("RoomService", "房间切换字幕", {
+      roomCode: room.roomCode,
+      filePath,
+      fileName: room.currentSubtitle?.fileName ?? null
+    });
     return clonePublicRoom(room);
   }
 
@@ -284,6 +330,13 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     }
     room.playbackState = this.nextPlaybackState(room, patch);
     this.touch(room);
+    logInfo("RoomService", "房间播放状态变更", {
+      roomCode: room.roomCode,
+      playing: room.playbackState.playing,
+      positionSeconds: room.playbackState.positionSeconds,
+      playbackRate: room.playbackState.playbackRate,
+      version: room.playbackState.version
+    });
     return clonePublicRoom(room);
   }
 
@@ -296,6 +349,12 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     member.voiceJoined = patch.voiceJoined ?? member.voiceJoined;
     member.muted = patch.muted ?? member.muted;
     this.touch(room);
+    logInfo("RoomService", "成员语音状态变更", {
+      roomCode: room.roomCode,
+      memberId,
+      voiceJoined: member.voiceJoined,
+      muted: member.muted
+    });
     return clonePublicRoom(room);
   }
 
@@ -356,6 +415,12 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       version: previous.version + 1
     };
     this.touch(room);
+    logInfo("RoomService", "房主推流开始", {
+      roomCode: room.roomCode,
+      memberId,
+      fileName: room.hostStreamState.fileName,
+      version: room.hostStreamState.version
+    });
     return clonePublicRoom(room);
   }
 
@@ -377,6 +442,11 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       version: previous.version + 1
     };
     this.touch(room);
+    logInfo("RoomService", "房主推流停止", {
+      roomCode: room.roomCode,
+      memberId,
+      version: room.hostStreamState.version
+    });
     return clonePublicRoom(room);
   }
 

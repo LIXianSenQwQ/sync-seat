@@ -2,6 +2,7 @@ import { Controller, Get, Query, Req } from "@nestjs/common";
 import type { Request } from "express";
 import type { DriveEntry, IceServerConfig } from "@sync-seat/shared";
 import { EnvConfig } from "../config/env.js";
+import { logInfo } from "../logging/app-logger.js";
 import { AlistService } from "./alist.service.js";
 
 /**
@@ -24,6 +25,7 @@ export class AlistController {
    */
   @Get("list")
   list(@Query("path") path = "/"): Promise<DriveEntry[]> {
+    logInfo("AlistController", "REST 请求目录列表", { path });
     return this.alist.listDirectory(path);
   }
 
@@ -35,6 +37,7 @@ export class AlistController {
    */
   @Get("subtitles")
   subtitles(@Query("videoPath") videoPath: string): Promise<DriveEntry[]> {
+    logInfo("AlistController", "REST 请求同目录字幕", { videoPath });
     return this.alist.listSubtitlesNearVideo(videoPath);
   }
 
@@ -45,7 +48,9 @@ export class AlistController {
    */
   @Get("ice-servers")
   iceServers(): IceServerConfig[] {
-    return this.env.getIceServers();
+    const servers = this.env.getIceServers();
+    logInfo("AlistController", "REST 请求 ICE 配置", { serverCount: servers.length });
+    return servers;
   }
 
   /**
@@ -57,6 +62,7 @@ export class AlistController {
   whoami(@Req() req: Request): { ip: string } {
     // trust proxy 后 req.ip 为代理转发的真实客户端 IP，去掉 IPv4-mapped IPv6 前缀
     const ip = (req.ip ?? "unknown").replace(/^::ffff:/i, "");
+    logInfo("AlistController", "REST 请求客户端真实 IP", { ip });
     return { ip };
   }
 }

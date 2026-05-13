@@ -14,6 +14,10 @@ export class EnvConfig {
   readonly turnUrls = parseCsv(process.env.WEBRTC_TURN_URLS);
   readonly turnUsername = process.env.WEBRTC_TURN_USERNAME;
   readonly turnPassword = process.env.WEBRTC_TURN_PASSWORD;
+  readonly logLevel = process.env.LOG_LEVEL ?? "info";
+  readonly logDir = process.env.LOG_DIR ?? "logs";
+  readonly logRetentionDays = process.env.LOG_RETENTION_DAYS ?? "14d";
+  readonly logMaxFileSize = process.env.LOG_MAX_FILE_SIZE ?? "20m";
 
   /**
    * 生成浏览器 RTCPeerConnection 可直接使用的 ICE 配置。

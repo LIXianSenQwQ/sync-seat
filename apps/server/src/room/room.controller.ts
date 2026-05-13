@@ -3,6 +3,7 @@ import { Body, Controller, Get, Headers, Param, Post, Res } from "@nestjs/common
 import type { CreateRoomRequest, CreateRoomResponse, JoinRoomRequest, RoomState } from "@sync-seat/shared";
 import type { Response } from "express";
 import { SubtitleService } from "../drive/subtitle.service.js";
+import { logInfo } from "../logging/app-logger.js";
 import { RoomService } from "./room.service.js";
 
 /**
@@ -26,6 +27,11 @@ export class RoomController {
   @Post()
   create(@Body() body: CreateRoomRequest): CreateRoomResponse {
     const room = this.rooms.createRoom(body.memberId, body.nickname, body.password, body.watchMode);
+    logInfo("RoomController", "REST 创建房间完成", {
+      roomCode: room.roomCode,
+      memberId: body.memberId,
+      watchMode: room.watchMode
+    });
     return {
       room,
       inviteUrl: `/room/${room.roomCode}`
@@ -41,7 +47,13 @@ export class RoomController {
    */
   @Post(":roomCode/join")
   join(@Param("roomCode") roomCode: string, @Body() body: JoinRoomRequest): RoomState {
-    return this.rooms.joinRoom(roomCode, body.memberId, body.nickname, body.password).room;
+    const result = this.rooms.joinRoom(roomCode, body.memberId, body.nickname, body.password);
+    logInfo("RoomController", "REST 加入房间完成", {
+      roomCode: result.room.roomCode,
+      memberId: body.memberId,
+      reconnected: result.reconnected
+    });
+    return result.room;
   }
 
   /**
@@ -65,6 +77,11 @@ export class RoomController {
   @Get(":roomCode/video")
   async video(@Param("roomCode") roomCode: string, @Headers("range") range: string | undefined, @Res() response: Response): Promise<void> {
     const upstream = await this.rooms.openCurrentVideoStream(roomCode, range);
+    logInfo("RoomController", "代理当前视频内容", {
+      roomCode,
+      statusCode: upstream.status,
+      hasRange: Boolean(range)
+    });
     response.status(upstream.status);
     for (const header of ["accept-ranges", "cache-control", "content-length", "content-range", "content-type", "etag", "last-modified"]) {
       const value = upstream.headers.get(header);
@@ -89,10 +106,16 @@ export class RoomController {
   async subtitle(@Param("roomCode") roomCode: string, @Res() response: Response): Promise<void> {
     const subtitle = this.rooms.getCurrentSubtitle(roomCode);
     if (!subtitle) {
+      logInfo("RoomController", "房间未选择字幕，返回空 WebVTT", { roomCode });
       response.type("text/vtt; charset=utf-8").send("WEBVTT\n\n");
       return;
     }
     const content = await this.subtitles.readAsVtt(subtitle.filePath);
+    logInfo("RoomController", "输出当前字幕 WebVTT", {
+      roomCode,
+      filePath: subtitle.filePath,
+      fileName: subtitle.fileName
+    });
     response.type("text/vtt; charset=utf-8").send(content);
   }
 }

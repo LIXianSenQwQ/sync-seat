@@ -20,8 +20,15 @@ services:
       WEBRTC_TURN_PASSWORD: replace-with-strong-turn-password
       # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
       WEB_DIST_PATH: /app/apps/web/dist
+      # 服务端文件日志默认写入 /app/logs，按天轮转后由下方 volume 持久化。
+      LOG_LEVEL: info
+      LOG_DIR: /app/logs
+      LOG_RETENTION_DAYS: 14d
+      LOG_MAX_FILE_SIZE: 20m
     expose:
       - "3000"
+    volumes:
+      - ./logs:/app/logs
 
   nginx:
     image: docker.1ms.run/nginx:alpine

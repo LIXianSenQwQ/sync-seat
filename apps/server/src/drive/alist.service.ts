@@ -1,6 +1,7 @@
 import { BadGatewayException, ForbiddenException, Injectable, UnauthorizedException } from "@nestjs/common";
 import type { CurrentVideo, DriveEntry } from "@sync-seat/shared";
 import { EnvConfig, normalizePath } from "../config/env.js";
+import { logError, logInfo, logWarn } from "../logging/app-logger.js";
 import { isSubtitleFile, isVideoFile } from "./file-kind.js";
 
 interface AlistItem {
@@ -48,6 +49,7 @@ export class AlistService {
       return virtualEntries;
     }
     this.assertAllowedPath(safePath);
+    logInfo("AlistService", "读取网盘目录", { path: safePath });
     const data = await this.request<{ content: AlistItem[] }>("/api/fs/list", {
       path: safePath,
       password: "",
@@ -91,6 +93,7 @@ export class AlistService {
 
     const data = await this.request<AlistItem>("/api/fs/get", { path: safePath, password: "" });
     const fileName = safePath.split("/").pop() ?? safePath;
+    logInfo("AlistService", "解析视频文件", { path: safePath, fileName, size: data.size });
     return {
       filePath: safePath,
       fileName,
@@ -107,6 +110,7 @@ export class AlistService {
    */
   async resolveFileUrl(path: string): Promise<string> {
     const safePath = this.assertAllowedPath(path);
+    logInfo("AlistService", "解析文件访问地址", { path: safePath });
     return this.getFileAccessUrl(safePath);
   }
 
@@ -130,8 +134,17 @@ export class AlistService {
 
     const response = await fetch(url, { headers });
     if (!response.ok && response.status !== 416) {
+      logWarn("AlistService", "AList/OpenList 文件读取失败", {
+        path: safePath,
+        statusCode: response.status
+      });
       throw new BadGatewayException("AList/OpenList 文件读取失败");
     }
+    logInfo("AlistService", "打开文件读取流", {
+      path: safePath,
+      statusCode: response.status,
+      hasRange: Boolean(range)
+    });
     return response;
   }
 
@@ -151,8 +164,13 @@ export class AlistService {
       headers: await this.authHeaders()
     });
     if (!response.ok) {
+      logWarn("AlistService", "字幕文件读取失败", {
+        path: safePath,
+        statusCode: response.status
+      });
       throw new BadGatewayException("字幕文件读取失败");
     }
+    logInfo("AlistService", "读取字幕文件", { path: safePath });
     return response.text();
   }
 
@@ -176,6 +194,10 @@ export class AlistService {
     }
     const allowed = this.isAllowedPath(safePath);
     if (!allowed) {
+      logWarn("AlistService", "拒绝访问白名单外路径", {
+        path: safePath,
+        allowedRootPaths: roots
+      });
       throw new ForbiddenException("路径不在允许访问的网盘目录内");
     }
     return safePath;
@@ -221,6 +243,11 @@ export class AlistService {
 
   private async request<T>(apiPath: string, body: unknown): Promise<T> {
     if (!this.env.alistBaseUrl || !this.env.alistUsername || !this.env.alistPassword) {
+      logError("AlistService", "AList/OpenList 配置不完整", {
+        hasBaseUrl: Boolean(this.env.alistBaseUrl),
+        hasUsername: Boolean(this.env.alistUsername),
+        hasPassword: Boolean(this.env.alistPassword)
+      });
       throw new BadGatewayException("AList/OpenList 配置不完整");
     }
 
@@ -239,24 +266,51 @@ export class AlistService {
 
     if (response.status === 401 || response.status === 403) {
       if (allowRelogin) {
+        logWarn("AlistService", "AList/OpenList token 失效，准备重新登录", {
+          apiPath,
+          statusCode: response.status
+        });
         this.cachedToken = null;
         return this.requestWithRetry<T>(apiPath, body, false);
       }
+      logWarn("AlistService", "AList/OpenList 登录状态无效或无权限", {
+        apiPath,
+        statusCode: response.status
+      });
       throw new UnauthorizedException("AList/OpenList 登录状态无效或无权限");
     }
     if (!response.ok) {
+      logWarn("AlistService", "AList/OpenList HTTP 请求失败", {
+        apiPath,
+        statusCode: response.status
+      });
       throw new BadGatewayException("AList/OpenList 服务不可用");
     }
 
     const payload = (await response.json()) as AlistResponse<T>;
     if (payload.code === 401 || payload.code === 403) {
       if (allowRelogin) {
+        logWarn("AlistService", "AList/OpenList 业务 token 失效，准备重新登录", {
+          apiPath,
+          code: payload.code,
+          message: payload.message
+        });
         this.cachedToken = null;
         return this.requestWithRetry<T>(apiPath, body, false);
       }
+      logWarn("AlistService", "AList/OpenList 业务鉴权失败", {
+        apiPath,
+        code: payload.code,
+        message: payload.message
+      });
       throw new UnauthorizedException(payload.message || "AList/OpenList 鉴权失败");
     }
     if (payload.code !== 200) {
+      logWarn("AlistService", "AList/OpenList 业务请求失败", {
+        apiPath,
+        code: payload.code,
+        message: payload.message
+      });
       throw new BadGatewayException(payload.message || "AList/OpenList 请求失败");
     }
     return payload.data;
@@ -299,6 +353,11 @@ export class AlistService {
 
   private async login(): Promise<string> {
     if (!this.env.alistBaseUrl || !this.env.alistUsername || !this.env.alistPassword) {
+      logError("AlistService", "AList/OpenList 登录配置不完整", {
+        hasBaseUrl: Boolean(this.env.alistBaseUrl),
+        hasUsername: Boolean(this.env.alistUsername),
+        hasPassword: Boolean(this.env.alistPassword)
+      });
       throw new BadGatewayException("AList/OpenList 配置不完整");
     }
 
@@ -314,19 +373,31 @@ export class AlistService {
     });
 
     if (response.status === 401 || response.status === 403) {
+      logWarn("AlistService", "AList/OpenList 用户名或密码错误", { statusCode: response.status });
       throw new UnauthorizedException("AList/OpenList 用户名或密码错误");
     }
     if (!response.ok) {
+      logWarn("AlistService", "AList/OpenList 登录服务不可用", { statusCode: response.status });
       throw new BadGatewayException("AList/OpenList 登录服务不可用");
     }
 
     const payload = (await response.json()) as AlistResponse<AlistAuthData>;
     if (payload.code === 401 || payload.code === 403) {
+      logWarn("AlistService", "AList/OpenList 业务登录鉴权失败", {
+        code: payload.code,
+        message: payload.message
+      });
       throw new UnauthorizedException(payload.message || "AList/OpenList 用户名或密码错误");
     }
     if (payload.code !== 200 || !payload.data?.token) {
+      logWarn("AlistService", "AList/OpenList 登录失败", {
+        code: payload.code,
+        message: payload.message,
+        hasToken: Boolean(payload.data?.token)
+      });
       throw new BadGatewayException(payload.message || "AList/OpenList 登录失败");
     }
+    logInfo("AlistService", "AList/OpenList 登录成功", { baseUrl: this.env.alistBaseUrl });
     return payload.data.token;
   }
 }

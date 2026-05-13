@@ -6,6 +6,8 @@ coverage/
 !.env.example
 .DS_Store
 *.log
+logs/
+apps/server/logs/
 letsencrypt/
 
 .agents/

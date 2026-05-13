@@ -2,6 +2,7 @@ import { BadRequestException } from "@nestjs/common";
 import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer } from "@nestjs/websockets";
 import type { ClientRoomEvent, HostControlCommand } from "@sync-seat/shared";
 import type { Server, Socket } from "socket.io";
+import { logInfo, logWarn } from "../logging/app-logger.js";
 import { RoomService } from "./room.service.js";
 import { RealtimeService } from "./realtime.service.js";
 
@@ -25,14 +26,23 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly realtime: RealtimeService
   ) {}
 
-  handleConnection(): void {
+  handleConnection(socket: Socket): void {
     // 连接建立后等待客户端显式 join_room，避免错误加入房间。
+    logInfo("RoomGateway", "WebSocket 连接建立", { socketId: socket.id });
   }
 
   handleDisconnect(socket: Socket): void {
     const binding = this.realtime.unbind(socket.id);
-    if (!binding) return;
+    if (!binding) {
+      logInfo("RoomGateway", "未绑定房间的 WebSocket 断开", { socketId: socket.id });
+      return;
+    }
     if (this.realtime.targetSocketIds(binding.roomCode, binding.memberId).length > 0) {
+      logInfo("RoomGateway", "成员仍有其他 WebSocket 连接在线", {
+        socketId: socket.id,
+        roomCode: binding.roomCode,
+        memberId: binding.memberId
+      });
       return;
     }
     const room = this.rooms.leaveRoom(binding.roomCode, binding.memberId);
@@ -50,6 +60,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const roomCode = body.roomCode.toUpperCase();
     const existingRoom = this.rooms.getRoom(roomCode);
     if (!existingRoom.members.some((member) => member.memberId === body.memberId)) {
+      logWarn("RoomGateway", "拒绝未通过 REST 加入的 WebSocket 绑定", {
+        socketId: socket.id,
+        roomCode,
+        memberId: body.memberId
+      });
       socket.emit("room_event", { type: "room_error", message: "请先通过 REST API 加入房间" });
       return;
     }
@@ -58,6 +73,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const roomName = this.realtime.roomName(roomCode);
     await socket.join(roomName);
     // 步骤1：成员实时通道就绪后向整个房间广播，确保成员列表不依赖下一次播放/语音事件才刷新。
+    logInfo("RoomGateway", "WebSocket 加入房间", {
+      socketId: socket.id,
+      roomCode,
+      memberId: body.memberId
+    });
     this.broadcastState(roomName, room);
   }
 
@@ -73,11 +93,13 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     // 步骤1：播放与字幕类消息更新服务端权威房间状态。
     if (event.type === "load_video") {
+      logInfo("RoomGateway", "收到加载视频事件", { roomCode, memberId: event.memberId, filePath: event.filePath });
       const room = await this.rooms.loadVideo(roomCode, event.filePath);
       this.server.to(roomName).emit("room_event", this.realtime.stateEvent(room));
       return;
     }
     if (event.type === "select_subtitle") {
+      logInfo("RoomGateway", "收到切换字幕事件", { roomCode, memberId: event.memberId, filePath: event.filePath });
       const room = this.rooms.selectSubtitle(roomCode, event.filePath);
       this.server.to(roomName).emit("room_event", this.realtime.stateEvent(room));
       return;
@@ -99,6 +121,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playbackRate: event.playbackRate, positionSeconds: event.positionSeconds }));
       } catch (err) {
         if (err instanceof BadRequestException) {
+          logWarn("RoomGateway", "拒绝非法播放倍速", {
+            roomCode,
+            memberId: event.memberId,
+            playbackRate: event.playbackRate
+          });
           this.emitRoomError(roomCode, event.memberId, err.message);
           return;
         }
@@ -107,10 +134,12 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     if (event.type === "host_stream_start") {
+      logInfo("RoomGateway", "收到房主推流开始事件", { roomCode, memberId: event.memberId, fileName: event.fileName });
       this.broadcastState(roomName, this.rooms.startHostStream(roomCode, event.memberId, event.fileName));
       return;
     }
     if (event.type === "host_stream_stop") {
+      logInfo("RoomGateway", "收到房主推流停止事件", { roomCode, memberId: event.memberId });
       this.broadcastState(roomName, this.rooms.stopHostStream(roomCode, event.memberId));
       return;
     }
@@ -125,6 +154,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       for (const socketId of this.realtime.targetSocketIds(roomCode, this.rooms.getOwnerId(roomCode))) {
         this.server.to(socketId).emit("room_event", command);
       }
+      logInfo("RoomGateway", "转发房主控制请求", {
+        roomCode,
+        fromMemberId: event.memberId,
+        action: event.action
+      });
       return;
     }
 
@@ -151,6 +185,12 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       for (const socketId of this.realtime.targetSocketIds(roomCode, event.targetMemberId)) {
         this.server.to(socketId).emit("room_event", signal);
       }
+      logInfo("RoomGateway", "转发语音 WebRTC 信令", {
+        roomCode,
+        fromMemberId: event.memberId,
+        targetMemberId: event.targetMemberId,
+        signalType: signal.signalType
+      });
     }
     if (event.type === "host_stream_offer" || event.type === "host_stream_answer" || event.type === "host_stream_ice_candidate") {
       const signal = {
@@ -162,6 +202,12 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       for (const socketId of this.realtime.targetSocketIds(roomCode, event.targetMemberId)) {
         this.server.to(socketId).emit("room_event", signal);
       }
+      logInfo("RoomGateway", "转发房主推流 WebRTC 信令", {
+        roomCode,
+        fromMemberId: event.memberId,
+        targetMemberId: event.targetMemberId,
+        signalType: signal.signalType
+      });
     }
   }
 

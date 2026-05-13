@@ -5,6 +5,10 @@ import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import type { NextFunction, Request, Response } from "express";
 import { AppModule } from "./app.module.js";
+import { AppExceptionFilter } from "./logging/app-exception.filter.js";
+import { logInfo } from "./logging/app-logger.js";
+import { WinstonNestLogger } from "./logging/nest-logger.js";
+import { requestLoggingMiddleware } from "./logging/request-logging.middleware.js";
 
 /**
  * 前端构建产物的默认路径，生产镜像会把 Vue dist 复制到这里。
@@ -17,9 +21,15 @@ const defaultWebDistPath = join(process.cwd(), "apps/web/dist");
  * @author 清羽
  */
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const nestLogger = new WinstonNestLogger();
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: nestLogger
+  });
+  app.useLogger(nestLogger);
   // 信任 Vite/Nginx 代理转发的 X-Forwarded-For 头，以便获取客户端真实 IP。
   app.getHttpAdapter().getInstance().set("trust proxy", 1);
+  app.use(requestLoggingMiddleware);
+  app.useGlobalFilters(new AppExceptionFilter());
   const origin = process.env.WEB_ORIGIN ?? "http://localhost:5173";
 
   // 步骤1：允许前端开发服务器访问 REST API 和 WebSocket 握手。
@@ -29,11 +39,16 @@ async function bootstrap(): Promise<void> {
   });
 
   // 步骤2：生产镜像存在前端构建产物时，直接由 Nest 托管静态资源。
-  configureStaticAssets(app);
+  const staticAssetsEnabled = configureStaticAssets(app);
 
   // 步骤3：按环境变量启动端口，保持单机部署简单。
   const port = Number(process.env.SERVER_PORT ?? 3000);
   await app.listen(port);
+  logInfo("Bootstrap", "服务启动完成", {
+    port,
+    origin,
+    staticAssetsEnabled
+  });
 }
 
 /**
@@ -41,12 +56,13 @@ async function bootstrap(): Promise<void> {
  *
  * @param app Nest Express 应用实例。
  */
-function configureStaticAssets(app: NestExpressApplication): void {
+function configureStaticAssets(app: NestExpressApplication): boolean {
   const webDistPath = resolve(process.env.WEB_DIST_PATH ?? defaultWebDistPath);
   const indexFilePath = join(webDistPath, "index.html");
 
   if (!existsSync(indexFilePath)) {
-    return;
+    logInfo("Bootstrap", "未启用前端静态资源托管", { webDistPath });
+    return false;
   }
 
   app.useStaticAssets(webDistPath, {
@@ -61,6 +77,8 @@ function configureStaticAssets(app: NestExpressApplication): void {
 
     response.sendFile(indexFilePath);
   });
+  logInfo("Bootstrap", "已启用前端静态资源托管", { webDistPath });
+  return true;
 }
 
 /**
