@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import type { CurrentSubtitle, HostStreamState, PlaybackState, RoomState, WatchMode } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type CurrentSubtitle, type HostStreamState, type PlaybackState, type RoomState, type WatchMode } from "@sync-seat/shared";
 import { AlistService } from "../drive/alist.service.js";
 import { SubtitleService } from "../drive/subtitle.service.js";
 import { clonePublicRoom, type JoinResult, type StoredRoom } from "./room.types.js";
@@ -279,6 +279,9 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
   updatePlayback(roomCode: string, patch: Pick<PlaybackState, "positionSeconds"> & Partial<Pick<PlaybackState, "playing" | "playbackRate">>): RoomState {
     const room = this.getStoredRoom(roomCode);
     this.assertDirectMode(room);
+    if (patch.playbackRate !== undefined && !this.isAllowedPlaybackRate(patch.playbackRate)) {
+      throw new BadRequestException(`只支持 ${PLAYBACK_RATE_OPTIONS.map((rate) => `${rate}x`).join("、")} 倍速`);
+    }
     room.playbackState = this.nextPlaybackState(room, patch);
     this.touch(room);
     return clonePublicRoom(room);
@@ -313,6 +316,22 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException("房间尚未选择视频");
     }
     return this.alist.resolveFileUrl(room.currentVideo.filePath);
+  }
+
+  /**
+   * 打开房间当前视频的代理读取流。
+   *
+   * @param roomCode 房间码。
+   * @param range 浏览器 Range 请求头。
+   * @returns 上游文件响应。
+   */
+  async openCurrentVideoStream(roomCode: string, range?: string): Promise<Response> {
+    const room = this.getStoredRoom(roomCode);
+    this.assertDirectMode(room);
+    if (!room.currentVideo) {
+      throw new NotFoundException("房间尚未选择视频");
+    }
+    return this.alist.openFileStream(room.currentVideo.filePath, range);
   }
 
   /**
@@ -422,6 +441,10 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       stateUpdatedAt: new Date().toISOString(),
       version: room.playbackState.version + 1
     };
+  }
+
+  private isAllowedPlaybackRate(playbackRate: number): boolean {
+    return PLAYBACK_RATE_OPTIONS.some((rate) => Math.abs(rate - playbackRate) < 0.001);
   }
 
   private assertPassword(room: StoredRoom, password?: string): void {

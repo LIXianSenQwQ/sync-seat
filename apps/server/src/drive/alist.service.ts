@@ -107,8 +107,32 @@ export class AlistService {
    */
   async resolveFileUrl(path: string): Promise<string> {
     const safePath = this.assertAllowedPath(path);
-    const file = await this.request<AlistItem>("/api/fs/get", { path: safePath, password: "" });
-    return file.raw_url ?? `${this.env.alistBaseUrl}/d${encodeURI(safePath)}`;
+    return this.getFileAccessUrl(safePath);
+  }
+
+  /**
+   * 打开文件读取流，供后端代理视频内容给浏览器。
+   *
+   * @param path 文件路径。
+   * @param range 浏览器 Range 请求头，用于支持拖动进度和分片加载。
+   * @returns AList/OpenList 或其后端存储返回的文件响应。
+   */
+  async openFileStream(path: string, range?: string): Promise<Response> {
+    const safePath = this.assertAllowedPath(path);
+    const url = await this.getFileAccessUrl(safePath);
+    const headers: Record<string, string> = {};
+    if (range) {
+      headers.Range = range;
+    }
+    if (this.isAlistOrigin(url)) {
+      Object.assign(headers, await this.authHeaders());
+    }
+
+    const response = await fetch(url, { headers });
+    if (!response.ok && response.status !== 416) {
+      throw new BadGatewayException("AList/OpenList 文件读取失败");
+    }
+    return response;
   }
 
   /**
@@ -236,6 +260,22 @@ export class AlistService {
       throw new BadGatewayException(payload.message || "AList/OpenList 请求失败");
     }
     return payload.data;
+  }
+
+  private async getFileAccessUrl(safePath: string): Promise<string> {
+    const file = await this.request<AlistItem>("/api/fs/get", { path: safePath, password: "" });
+    return this.normalizeFileUrl(file.raw_url, safePath);
+  }
+
+  private normalizeFileUrl(rawUrl: string | undefined, safePath: string): string {
+    if (rawUrl) {
+      return new URL(rawUrl, `${this.env.alistBaseUrl}/`).toString();
+    }
+    return `${this.env.alistBaseUrl}/d${encodeURI(safePath)}`;
+  }
+
+  private isAlistOrigin(url: string): boolean {
+    return new URL(url).origin === new URL(this.env.alistBaseUrl).origin;
   }
 
   private async authHeaders(): Promise<Record<string, string>> {

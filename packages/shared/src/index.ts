@@ -64,6 +64,15 @@ export interface PlaybackState {
 }
 
 /**
+ * 直链房间允许同步的固定播放倍速。
+ *
+ * @author 清羽
+ */
+export const PLAYBACK_RATE_OPTIONS = [1, 1.25, 1.5, 2] as const;
+
+export type PlaybackRateOption = (typeof PLAYBACK_RATE_OPTIONS)[number];
+
+/**
  * 房间观影模式。
  *
  * @author 清羽

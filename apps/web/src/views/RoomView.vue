@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ClientRoomEvent, DriveEntry, HostControlCommand, RoomState } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type RoomState } from "@sync-seat/shared";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../services/api";
@@ -40,10 +40,12 @@ let clientIpPromise: Promise<string> | null = null;
 let pauseSendTimer: number | null = null;
 let localPlaybackGuardUntil = 0;
 let wasPlayingBeforeSeek = false;
+let pendingLocalSeekTarget: number | null = null;
+let localSeekRetryCount = 0;
 let suppressNextPlayEvent = false;
 let suppressRemotePlayEvent = false;
 let suppressRemotePauseEvent = false;
-let suppressRemoteRateEvent = false;
+let suppressRemoteRateEventUntil = 0;
 let suppressRemoteSeekEvent = false;
 let remoteSeekInProgress = false;
 let remoteSeekTarget: number | null = null;
@@ -64,6 +66,7 @@ const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = 
   { label: "标准", value: "standard" },
   { label: "流畅", value: "smooth" }
 ];
+const playbackRateOptions = PLAYBACK_RATE_OPTIONS.map((value) => ({ label: `${value}x`, value }));
 const members = computed(() => room.value?.members ?? []);
 const currentMember = computed(() => members.value.find((member) => member.memberId === identity.memberId));
 const isOwner = computed(() => room.value?.ownerId === identity.memberId);
@@ -195,11 +198,11 @@ function applyRemotePlaybackState(video: HTMLVideoElement, playbackState: RoomSt
     remotePlayBlocked.value = false;
   }
   const target = targetPosition(playbackState);
-  if (Math.abs(target - video.currentTime) >= 1) {
+  if (!playbackState.playing || Math.abs(target - video.currentTime) > 2) {
     remoteSeekTarget = target;
     suppressRemoteSeekEvent = true;
   }
-  suppressRemoteRateEvent = true;
+  suppressRemoteRateEventUntil = Date.now() + 1200;
   suppressRemotePlayEvent = playbackState.playing && video.paused;
   suppressRemotePauseEvent = !playbackState.playing && !video.paused;
   void applyPlaybackState(video, playbackState)
@@ -219,7 +222,6 @@ function applyRemotePlaybackState(video: HTMLVideoElement, playbackState: RoomSt
   window.setTimeout(() => {
     suppressRemotePlayEvent = false;
     suppressRemotePauseEvent = false;
-    suppressRemoteRateEvent = false;
     suppressRemoteSeekEvent = false;
     remoteSeekInProgress = false;
     remoteSeekTarget = null;
@@ -239,12 +241,39 @@ function clearPendingPause(): void {
   }
 }
 
+function normalizedSeekTarget(video: HTMLVideoElement, positionSeconds: number): number {
+  if (Number.isFinite(video.duration)) {
+    return Math.min(Math.max(0, positionSeconds), video.duration);
+  }
+  return Math.max(0, positionSeconds);
+}
+
 function loadVideo(path: string): void {
   send({ type: "load_video", roomCode: roomCode.value, memberId: identity.memberId, filePath: path });
 }
 
 function selectSubtitle(path: string | null): void {
   send({ type: "select_subtitle", roomCode: roomCode.value, memberId: identity.memberId, filePath: path });
+}
+
+function formatPlaybackRate(playbackRate: number): string {
+  return `${playbackRate}x`;
+}
+
+function isAllowedPlaybackRate(playbackRate: number): boolean {
+  return PLAYBACK_RATE_OPTIONS.some((rate) => Math.abs(rate - playbackRate) < 0.001);
+}
+
+function changePlaybackRate(playbackRate: number): void {
+  if (!videoRef.value || !isAllowedPlaybackRate(playbackRate)) return;
+  guardLocalPlayback();
+  send({
+    type: "playback_rate_change",
+    roomCode: roomCode.value,
+    memberId: identity.memberId,
+    playbackRate,
+    positionSeconds: videoRef.value.currentTime
+  });
 }
 
 function onPlay(): void {
@@ -295,6 +324,18 @@ function onSeeking(): void {
   // 步骤1：记录拖动前的播放意图，避免原生控件 seek 时的临时暂停污染房间状态。
   wasPlayingBeforeSeek = !videoRef.value.paused || (room.value?.playbackState.playing ?? false);
   localSeeking.value = true;
+  const serverTarget = room.value ? targetPosition(room.value.playbackState) : null;
+  const currentTarget = normalizedSeekTarget(videoRef.value, videoRef.value.currentTime);
+  // 步骤2：记录用户真正拖到的目标点。未缓冲分片可能让原生控件短暂弹回旧位置，不能让弹回值覆盖目标点。
+  if (
+    pendingLocalSeekTarget === null ||
+    serverTarget === null ||
+    Math.abs(currentTarget - serverTarget) >= 0.75 ||
+    Math.abs(pendingLocalSeekTarget - serverTarget) < 0.75
+  ) {
+    pendingLocalSeekTarget = currentTarget;
+    localSeekRetryCount = 0;
+  }
   guardLocalPlayback(2500);
 }
 
@@ -305,13 +346,25 @@ function onSeeked(): void {
     remoteSeekTarget = null;
     localSeeking.value = false;
     wasPlayingBeforeSeek = false;
+    pendingLocalSeekTarget = null;
+    localSeekRetryCount = 0;
     return;
   }
 
-  const positionSeconds = videoRef.value.currentTime;
+  const targetSeconds = pendingLocalSeekTarget;
+  if (targetSeconds !== null && Math.abs(videoRef.value.currentTime - targetSeconds) >= 0.75 && localSeekRetryCount < 2) {
+    localSeekRetryCount += 1;
+    guardLocalPlayback(3500);
+    videoRef.value.currentTime = targetSeconds;
+    return;
+  }
+
+  const positionSeconds = targetSeconds ?? videoRef.value.currentTime;
   const shouldResume = wasPlayingBeforeSeek;
   localSeeking.value = false;
   wasPlayingBeforeSeek = false;
+  pendingLocalSeekTarget = null;
+  localSeekRetryCount = 0;
   remoteSeekTarget = null;
   guardLocalPlayback(2500);
 
@@ -330,10 +383,10 @@ function onSeeked(): void {
 
 function onRateChange(): void {
   if (!videoRef.value) return;
-  if (suppressRemoteRateEvent) {
-    suppressRemoteRateEvent = false;
+  if (Date.now() < suppressRemoteRateEventUntil) {
     return;
   }
+  if (!isAllowedPlaybackRate(videoRef.value.playbackRate)) return;
   guardLocalPlayback();
   send({
     type: "playback_rate_change",
@@ -679,6 +732,22 @@ onBeforeUnmount(() => {
             <input v-model.number="volume" type="range" min="0" max="1" step="0.05" />
           </label>
           <small>当前身份：{{ currentMember?.nickname }}</small>
+        </section>
+
+        <section v-if="isDirectMode" class="card compact">
+          <h2>播放控制</h2>
+          <div class="mode-toggle rate-toggle">
+            <button
+              v-for="option in playbackRateOptions"
+              :key="option.value"
+              type="button"
+              :class="{ active: Math.abs(room.playbackState.playbackRate - option.value) < 0.001 }"
+              @click="changePlaybackRate(option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <small>当前倍速：{{ formatPlaybackRate(room.playbackState.playbackRate) }}</small>
         </section>
 
         <section v-if="isDirectMode" class="card compact">

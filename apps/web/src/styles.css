@@ -137,6 +137,12 @@ h2 {
   margin-top: 0;
 }
 
+.rate-toggle {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
 .browser-layout {
   grid-template-columns: 280px 1fr;
   margin-top: 24px;

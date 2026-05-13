@@ -23,16 +23,24 @@ export function targetPosition(state: PlaybackState, nowMs = Date.now()): number
 export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState): Promise<void> {
   const target = targetPosition(state);
   const drift = target - video.currentTime;
-  video.playbackRate = state.playbackRate;
+  const absDrift = Math.abs(drift);
+  let nextPlaybackRate = state.playbackRate;
 
-  // 步骤1：小漂移不处理，避免频繁修正造成观感抖动。
-  if (Math.abs(drift) >= 1) {
+  // 步骤1：暂停时强制对齐所有成员；播放时 2 秒以上才直接 seek，避免小偏差造成画面跳动。
+  if (!state.playing) {
     video.currentTime = target;
-  } else if (Math.abs(drift) >= 0.5 && state.playing) {
-    video.playbackRate = state.playbackRate * (drift > 0 ? 1.05 : 0.95);
+  } else if (absDrift > 2) {
+    video.currentTime = target;
+  } else if (absDrift >= 0.5) {
+    nextPlaybackRate = state.playbackRate * (drift > 0 ? 1.05 : 0.95);
   }
 
-  // 步骤2：播放/暂停以服务端状态为准。
+  // 步骤2：轻微追赶只基于房间基础倍速临时调整，不改变服务端权威倍速。
+  if (Math.abs(video.playbackRate - nextPlaybackRate) >= 0.001) {
+    video.playbackRate = nextPlaybackRate;
+  }
+
+  // 步骤3：播放/暂停以服务端状态为准。
   if (state.playing && video.paused) {
     return video.play().then(() => undefined);
   }

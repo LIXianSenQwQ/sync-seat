@@ -1,3 +1,4 @@
+import { BadRequestException } from "@nestjs/common";
 import { ConnectedSocket, MessageBody, OnGatewayConnection, OnGatewayDisconnect, SubscribeMessage, WebSocketGateway, WebSocketServer } from "@nestjs/websockets";
 import type { ClientRoomEvent, HostControlCommand } from "@sync-seat/shared";
 import type { Server, Socket } from "socket.io";
@@ -94,7 +95,15 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     if (event.type === "playback_rate_change") {
-      this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playbackRate: event.playbackRate, positionSeconds: event.positionSeconds }));
+      try {
+        this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playbackRate: event.playbackRate, positionSeconds: event.positionSeconds }));
+      } catch (err) {
+        if (err instanceof BadRequestException) {
+          this.emitRoomError(roomCode, event.memberId, err.message);
+          return;
+        }
+        throw err;
+      }
       return;
     }
     if (event.type === "host_stream_start") {
@@ -158,5 +167,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   private broadcastState(roomName: string, room: ReturnType<RoomService["getRoom"]>): void {
     this.server.to(roomName).emit("room_event", this.realtime.stateEvent(room));
+  }
+
+  private emitRoomError(roomCode: string, memberId: string, message: string): void {
+    for (const socketId of this.realtime.targetSocketIds(roomCode, memberId)) {
+      this.server.to(socketId).emit("room_event", { type: "room_error", message });
+    }
   }
 }

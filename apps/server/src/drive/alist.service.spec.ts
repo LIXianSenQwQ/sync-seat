@@ -169,6 +169,32 @@ describe("AlistService", () => {
     await expect(service.resolveFileUrl("/Movies/demo.mp4")).resolves.toBe("https://cdn.test/demo.mp4");
     vi.unstubAllGlobals();
   });
+
+  it("代理打开文件流时透传 Range，并为同源 AList 地址携带鉴权", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(alistResponse({ token: "token-1" }))
+      .mockResolvedValueOnce(alistResponse({ name: "demo.mp4", is_dir: false, raw_url: "/p/Movies/demo.mp4?sign=abc" }))
+      .mockResolvedValueOnce(new Response("demo", {
+        status: 206,
+        headers: {
+          "content-range": "bytes 0-3/10",
+          "content-type": "video/mp4"
+        }
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new AlistService(new TestEnv());
+    const response = await service.openFileStream("/Movies/demo.mp4", "bytes=0-3");
+
+    expect(response.status).toBe(206);
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "https://alist.test/p/Movies/demo.mp4?sign=abc", expect.objectContaining({
+      headers: expect.objectContaining({
+        Range: "bytes=0-3",
+        Authorization: "token-1"
+      })
+    }));
+    vi.unstubAllGlobals();
+  });
 });
 
 function alistResponse<T>(data: T, code = 200, message = "success"): unknown {

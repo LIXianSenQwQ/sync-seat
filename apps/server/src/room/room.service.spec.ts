@@ -1,4 +1,4 @@
-import { ForbiddenException, NotFoundException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
 import { describe, expect, it, vi } from "vitest";
 import type { CurrentVideo } from "@sync-seat/shared";
 import { RoomService } from "./room.service.js";
@@ -13,7 +13,8 @@ function createService(): RoomService {
   return new RoomService(
     {
       getVideo: vi.fn(async () => video),
-      resolveFileUrl: vi.fn(async () => "https://alist.test/d/Movies/demo.mp4")
+      resolveFileUrl: vi.fn(async () => "https://alist.test/d/Movies/demo.mp4"),
+      openFileStream: vi.fn(async () => new Response(null, { status: 206 }))
     } as never,
     {
       buildCurrentSubtitle: vi.fn((filePath: string, roomCode: string) => ({
@@ -168,10 +169,27 @@ describe("RoomService", () => {
     expect(second.playbackState.positionSeconds).toBe(20);
   });
 
+  it("只允许固定房间倍速并递增播放版本", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    const updated = service.updatePlayback(room.roomCode, { playbackRate: 1.5, positionSeconds: 12 });
+
+    expect(updated.playbackState.playbackRate).toBe(1.5);
+    expect(updated.playbackState.positionSeconds).toBe(12);
+    expect(updated.playbackState.version).toBe(1);
+    expect(() => service.updatePlayback(room.roomCode, { playbackRate: 1.4, positionSeconds: 13 })).toThrow(BadRequestException);
+    expect(service.getRoom(room.roomCode).playbackState).toMatchObject({
+      playbackRate: 1.5,
+      positionSeconds: 12,
+      version: 1
+    });
+  });
+
   it("加载视频会清空字幕并重置播放位置", async () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
     service.selectSubtitle(room.roomCode, "/Movies/demo.srt");
+    service.updatePlayback(room.roomCode, { playbackRate: 2, positionSeconds: 30 });
     const updated = await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
 
     expect(updated.currentVideo).toEqual({
@@ -180,6 +198,7 @@ describe("RoomService", () => {
     });
     expect(updated.currentSubtitle).toBeNull();
     expect(updated.playbackState.positionSeconds).toBe(0);
+    expect(updated.playbackState.playbackRate).toBe(1);
   });
 
   it("只为房间当前视频解析 302 跳转地址", async () => {
@@ -190,6 +209,17 @@ describe("RoomService", () => {
     await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
 
     await expect(service.resolveCurrentVideoUrl(room.roomCode)).resolves.toBe("https://alist.test/d/Movies/demo.mp4");
+  });
+
+  it("只为房间当前视频打开代理读取流", async () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+
+    await expect(service.openCurrentVideoStream(room.roomCode, "bytes=0-99")).rejects.toThrow(NotFoundException);
+    await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
+
+    const response = await service.openCurrentVideoStream(room.roomCode, "bytes=0-99");
+    expect(response.status).toBe(206);
   });
 
   it("房主推流模式拒绝网盘选片和字幕状态污染", async () => {

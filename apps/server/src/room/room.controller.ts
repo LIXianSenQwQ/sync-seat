@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Res } from "@nestjs/common";
+import { Readable } from "node:stream";
+import { Body, Controller, Get, Headers, Param, Post, Res } from "@nestjs/common";
 import type { CreateRoomRequest, CreateRoomResponse, JoinRoomRequest, RoomState } from "@sync-seat/shared";
 import type { Response } from "express";
 import { SubtitleService } from "../drive/subtitle.service.js";
@@ -55,15 +56,27 @@ export class RoomController {
   }
 
   /**
-   * 跳转到房间当前视频的真实播放地址。
+   * 代理房间当前视频内容，避免浏览器直接访问内网 AList/OpenList 地址。
    *
    * @param roomCode 房间码。
+   * @param range 浏览器 Range 请求头。
    * @param response Express 响应对象。
    */
   @Get(":roomCode/video")
-  async video(@Param("roomCode") roomCode: string, @Res() response: Response): Promise<void> {
-    const url = await this.rooms.resolveCurrentVideoUrl(roomCode);
-    response.redirect(302, url);
+  async video(@Param("roomCode") roomCode: string, @Headers("range") range: string | undefined, @Res() response: Response): Promise<void> {
+    const upstream = await this.rooms.openCurrentVideoStream(roomCode, range);
+    response.status(upstream.status);
+    for (const header of ["accept-ranges", "cache-control", "content-length", "content-range", "content-type", "etag", "last-modified"]) {
+      const value = upstream.headers.get(header);
+      if (value) {
+        response.setHeader(header, value);
+      }
+    }
+    if (!upstream.body) {
+      response.end();
+      return;
+    }
+    Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>).pipe(response);
   }
 
   /**
@@ -77,11 +90,6 @@ export class RoomController {
     const subtitle = this.rooms.getCurrentSubtitle(roomCode);
     if (!subtitle) {
       response.type("text/vtt; charset=utf-8").send("WEBVTT\n\n");
-      return;
-    }
-    if (subtitle.format === "vtt") {
-      const url = await this.subtitles.resolveSubtitleUrl(subtitle.filePath);
-      response.redirect(302, url);
       return;
     }
     const content = await this.subtitles.readAsVtt(subtitle.filePath);
