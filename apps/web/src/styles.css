@@ -116,6 +116,11 @@ h2 {
   color: #f8fbff;
 }
 
+.quality-toggle {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 0;
+}
+
 .browser-layout {
   grid-template-columns: 280px 1fr;
   margin-top: 24px;
@@ -356,6 +361,11 @@ input:focus {
 .side-note {
   color: #9fb1bf;
   line-height: 1.6;
+}
+
+.ice-diagnostics {
+  border-left: 2px solid rgba(131, 208, 213, 0.6);
+  padding-left: 10px;
 }
 
 @media (max-width: 920px) {

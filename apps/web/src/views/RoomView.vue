@@ -3,7 +3,8 @@ import type { ClientRoomEvent, DriveEntry, HostControlCommand, RoomState } from 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { api } from "../services/api";
-import { HostStreamMesh } from "../services/host-stream";
+import { HostStreamMesh, type HostStreamQuality } from "../services/host-stream";
+import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { getIdentity } from "../services/identity";
 import { applyPlaybackState } from "../services/playback-sync";
 import { RoomSocket } from "../services/realtime";
@@ -34,18 +35,33 @@ const hostStream = shallowRef<HostStreamMesh | null>(null);
 let hostStreamPromise: Promise<HostStreamMesh> | null = null;
 /** 服务端返回的客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏 */
 let clientIp = "";
+let clientIpPromise: Promise<string> | null = null;
 const localVideoUrl = ref("");
 const localVideoName = ref("");
 const remoteStreamReady = ref(false);
-const hostStreamIceState = ref<Record<string, RTCPeerConnectionState>>({});
-const voiceIceState = ref<Record<string, RTCPeerConnectionState>>({});
+const hostStreamIceState = ref<Record<string, RTCIceConnectionState>>({});
+const hostStreamDiagnostics = ref<Record<string, HostStreamIceDiagnostics>>({});
+const voiceIceState = ref<Record<string, RTCIceConnectionState>>({});
+const hostStreamQuality = ref<HostStreamQuality>("original");
+const voiceJoining = ref(false);
 let calibrationTimer: number | null = null;
 
+const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
+  { label: "原画", value: "original" },
+  { label: "标准", value: "standard" },
+  { label: "流畅", value: "smooth" }
+];
 const members = computed(() => room.value?.members ?? []);
 const currentMember = computed(() => members.value.find((member) => member.memberId === identity.memberId));
 const isOwner = computed(() => room.value?.ownerId === identity.memberId);
 const isDirectMode = computed(() => room.value?.watchMode === "direct");
 const isHostStreamMode = computed(() => room.value?.watchMode === "host-stream");
+const hostStreamDiagnosticLabels = computed(() => Object.entries(hostStreamDiagnostics.value).map(([memberId, diagnostics]) => {
+  const member = members.value.find((item) => item.memberId === memberId);
+  const name = member?.nickname ?? memberId;
+  const restartText = diagnostics.restarted ? "，已重试 ICE" : "";
+  return `${name}: ${describeHostStreamRoute(diagnostics)} (${diagnostics.state}${restartText})`;
+}));
 
 async function join(): Promise<void> {
   error.value = "";
@@ -56,11 +72,7 @@ async function join(): Promise<void> {
       password: password.value || undefined
     });
     connectSocket();
-    // 获取客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏
-    api.getClientIp().then(({ ip }) => {
-      console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
-      clientIp = ip;
-    }).catch(() => undefined);
+    void ensureClientIp();
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -80,10 +92,7 @@ async function restoreIfMember(): Promise<boolean> {
       nickname: identity.nickname
     });
     connectSocket();
-    api.getClientIp().then(({ ip }) => {
-      console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
-      clientIp = ip;
-    }).catch(() => undefined);
+    void ensureClientIp();
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -132,6 +141,8 @@ function connectSocket(): void {
       error.value = reason;
       room.value = null;
       hostStream.value?.stop();
+      hostStreamDiagnostics.value = {};
+      hostStreamIceState.value = {};
     },
     (message) => {
       error.value = message;
@@ -187,12 +198,12 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
   // 防止并发信令到达时创建多个 HostStreamMesh 实例导致 ICE candidates 分发到错误实例
   if (!hostStreamPromise) {
     hostStreamPromise = (async () => {
-      const iceServers = await api.getIceServers();
+      const [iceServers, localIp] = await Promise.all([api.getIceServers(), ensureClientIp()]);
       console.log(`[HostStream] ICE 服务器配置已获取，共 ${iceServers.length} 台`);
       hostStream.value = new HostStreamMesh(
         iceServers,
         identity.memberId,
-        clientIp,
+        localIp,
         (targetMemberId, type, payload) => {
           send({
             type: type === "offer" ? "host_stream_offer" : type === "answer" ? "host_stream_answer" : "host_stream_ice_candidate",
@@ -215,14 +226,38 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
           hostStreamIceState.value = { ...hostStreamIceState.value, [memberId]: state };
           // 连接失败时给出明确提示
           if (state === "failed" || state === "disconnected") {
-            console.warn(`[HostStream] 与 ${memberId} 的 ICE 连接失败 (state: ${state})，请检查网络或配置 TURN 中继`);
+            console.warn(`[HostStream] 与 ${memberId} 的 ICE 连接异常 (state: ${state})，请检查 NAT 类型、STUN 可达性、安全上下文或配置 TURN 中继`);
           }
-        }
+        },
+        (memberId, diagnostics) => {
+          hostStreamDiagnostics.value = { ...hostStreamDiagnostics.value, [memberId]: diagnostics };
+        },
+        hostStreamQuality.value
       );
       return hostStream.value;
     })();
   }
   return hostStreamPromise;
+}
+
+async function ensureClientIp(): Promise<string> {
+  if (clientIp) return clientIp;
+  if (!clientIpPromise) {
+    clientIpPromise = api.getClientIp()
+      .then(({ ip }) => {
+        clientIp = ip;
+        console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
+        return ip;
+      })
+      .catch((err) => {
+        console.warn("[HostStream] 获取客户端局域网 IP 失败，跳过 mDNS 候选修复:", err);
+        return "";
+      })
+      .finally(() => {
+        clientIpPromise = null;
+      });
+  }
+  return clientIpPromise;
 }
 
 function selectLocalVideo(event: Event): void {
@@ -262,6 +297,8 @@ function stopHostStream(): void {
   hostStream.value?.stop();
   hostStream.value = null;
   hostStreamPromise = null;
+  hostStreamDiagnostics.value = {};
+  hostStreamIceState.value = {};
   send({ type: "host_stream_stop", roomCode: roomCode.value, memberId: identity.memberId });
 }
 
@@ -291,28 +328,66 @@ function applyHostControl(command: HostControlCommand): void {
 }
 
 async function joinVoice(): Promise<void> {
-  const iceServers = await api.getIceServers();
-  voice.value = new VoiceMesh(iceServers, identity.memberId, (targetMemberId, type, payload) => {
-    send({
-      type: type === "offer" ? "voice_offer" : type === "answer" ? "voice_answer" : "voice_ice_candidate",
-      roomCode: roomCode.value,
-      memberId: identity.memberId,
-      targetMemberId,
-      ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
-    } as ClientRoomEvent);
-  }, (memberId, state) => {
-    voiceIceState.value = { ...voiceIceState.value, [memberId]: state };
-  });
-  await voice.value.join(members.value);
-  voice.value.setVolume(volume.value);
-  voiceJoined.value = true;
-  send({ type: "voice_join", roomCode: roomCode.value, memberId: identity.memberId });
+  if (voiceJoining.value || voiceJoined.value) return;
+  let localStream: MediaStream | null = null;
+  voiceJoining.value = true;
+  error.value = "";
+  try {
+    localStream = await requestMicrophoneStream();
+    const iceServers = await api.getIceServers();
+    voice.value = new VoiceMesh(iceServers, identity.memberId, (targetMemberId, type, payload) => {
+      send({
+        type: type === "offer" ? "voice_offer" : type === "answer" ? "voice_answer" : "voice_ice_candidate",
+        roomCode: roomCode.value,
+        memberId: identity.memberId,
+        targetMemberId,
+        ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
+      } as ClientRoomEvent);
+    }, (memberId, state) => {
+      voiceIceState.value = { ...voiceIceState.value, [memberId]: state };
+    });
+    await voice.value.join(members.value, localStream);
+    localStream = null;
+    voice.value.setVolume(volume.value);
+    voiceJoined.value = true;
+    send({ type: "voice_join", roomCode: roomCode.value, memberId: identity.memberId });
+  } catch (err) {
+    localStream?.getTracks().forEach((track) => track.stop());
+    voice.value?.leave();
+    voice.value = null;
+    error.value = normalizeVoiceError(err);
+  } finally {
+    voiceJoining.value = false;
+  }
+}
+
+async function requestMicrophoneStream(): Promise<MediaStream> {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error("当前页面不是安全上下文，浏览器不会弹出麦克风权限。请使用 localhost、127.0.0.1 或 HTTPS 访问页面。");
+  }
+  return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+}
+
+function normalizeVoiceError(err: unknown): string {
+  if (err instanceof DOMException) {
+    if (err.name === "NotAllowedError") {
+      return "麦克风权限被拒绝，请在浏览器地址栏权限设置中允许麦克风后重试";
+    }
+    if (err.name === "NotFoundError") {
+      return "未检测到可用麦克风，请连接或启用麦克风后重试";
+    }
+    if (err.name === "NotReadableError") {
+      return "麦克风正被其他程序占用，请关闭占用后重试";
+    }
+  }
+  return err instanceof Error ? err.message : "加入语音失败";
 }
 
 function leaveVoice(): void {
   voice.value?.leave();
   voice.value = null;
   voiceJoined.value = false;
+  voiceJoining.value = false;
   muted.value = false;
   send({ type: "voice_leave", roomCode: roomCode.value, memberId: identity.memberId });
 }
@@ -324,6 +399,9 @@ function toggleMute(): void {
 }
 
 watch(volume, (value) => voice.value?.setVolume(value));
+watch(hostStreamQuality, (quality) => {
+  void hostStream.value?.setQuality(quality);
+});
 
 onMounted(async () => {
   const restored = await restoreIfMember();
@@ -348,6 +426,8 @@ onBeforeUnmount(() => {
   hostStream.value?.stop();
   hostStream.value = null;
   hostStreamPromise = null;
+  hostStreamDiagnostics.value = {};
+  hostStreamIceState.value = {};
   if (localVideoUrl.value) {
     URL.revokeObjectURL(localVideoUrl.value);
   }
@@ -424,7 +504,9 @@ onBeforeUnmount(() => {
 
         <section class="card compact">
           <h2>语音</h2>
-          <button v-if="!voiceJoined" class="primary full" @click="joinVoice">加入语音</button>
+          <button v-if="!voiceJoined" class="primary full" :disabled="voiceJoining" @click="joinVoice">
+            {{ voiceJoining ? '正在加入…' : '加入语音' }}
+          </button>
           <template v-else>
             <button class="ghost full" @click="toggleMute">{{ muted ? '取消静音' : '静音' }}</button>
             <button class="danger full" @click="leaveVoice">退出语音</button>
@@ -466,6 +548,20 @@ onBeforeUnmount(() => {
               <span>本地视频</span>
               <input type="file" accept=".mp4,.webm,.mov,.m3u8,video/mp4,video/webm,video/quicktime,application/vnd.apple.mpegurl" @change="selectLocalVideo" />
             </label>
+            <div class="field">
+              <span>清晰度</span>
+              <div class="mode-toggle quality-toggle">
+                <button
+                  v-for="option in hostStreamQualityOptions"
+                  :key="option.value"
+                  type="button"
+                  :class="{ active: hostStreamQuality === option.value }"
+                  @click="hostStreamQuality = option.value"
+                >
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
             <button class="primary full" :disabled="!localVideoUrl" @click="startHostStream">开始推流</button>
             <button class="danger full" :disabled="!room.hostStreamState?.streaming" @click="stopHostStream">停止推流</button>
           </template>
@@ -478,8 +574,11 @@ onBeforeUnmount(() => {
                   ICE: {{ Object.values(hostStreamIceState).join(', ') }}
                 </span>
               </p>
+              <p v-if="hostStreamDiagnosticLabels.length" class="side-note ice-diagnostics">
+                {{ hostStreamDiagnosticLabels.join('；') }}
+              </p>
               <p v-if="Object.values(hostStreamIceState).some(s => s === 'failed' || s === 'disconnected')" class="error">
-                P2P 连接失败，请确认两台设备在同一局域网，或配置 TURN 中继服务器
+                P2P 连接异常，请检查双方 NAT 类型、STUN 是否可达，以及公网访问是否使用 HTTPS；复杂 NAT 下需要配置 TURN 中继服务器
               </p>
             </template>
             <p v-else class="side-note">房主尚未开始推流</p>
