@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import { Body, Controller, Get, Headers, Param, Post, Res } from "@nestjs/common";
 import type { CreateRoomRequest, CreateRoomResponse, JoinRoomRequest, RoomState } from "@sync-seat/shared";
-import type { Response } from "express";
+import type { Response as ExpressResponse } from "express";
 import { SubtitleService } from "../drive/subtitle.service.js";
 import { logInfo } from "../logging/app-logger.js";
 import { RoomService } from "./room.service.js";
@@ -75,8 +75,38 @@ export class RoomController {
    * @param response Express 响应对象。
    */
   @Get(":roomCode/video")
-  async video(@Param("roomCode") roomCode: string, @Headers("range") range: string | undefined, @Res() response: Response): Promise<void> {
-    const upstream = await this.rooms.openCurrentVideoStream(roomCode, range);
+  async video(@Param("roomCode") roomCode: string, @Headers("range") range: string | undefined, @Res() response: ExpressResponse): Promise<void> {
+    const abortController = new AbortController();
+    const abortUpstream = () => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    const cleanupAbortHooks = () => {
+      response.req.off("aborted", abortUpstream);
+      response.off("close", abortUpstream);
+      response.off("finish", cleanupAbortHooks);
+    };
+
+    response.req.once("aborted", abortUpstream);
+    response.once("close", abortUpstream);
+    response.once("finish", cleanupAbortHooks);
+
+    let upstream: globalThis.Response;
+    try {
+      upstream = await this.rooms.openCurrentVideoStream(roomCode, range, abortController.signal);
+    } catch (err) {
+      cleanupAbortHooks();
+      if (abortController.signal.aborted) {
+        return;
+      }
+      throw err;
+    }
+    if (abortController.signal.aborted) {
+      cleanupAbortHooks();
+      upstream.body?.cancel().catch(() => undefined);
+      return;
+    }
     logInfo("RoomController", "代理当前视频内容", {
       roomCode,
       statusCode: upstream.status,
@@ -90,10 +120,27 @@ export class RoomController {
       }
     }
     if (!upstream.body) {
+      cleanupAbortHooks();
       response.end();
       return;
     }
-    Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>).pipe(response);
+    const stream = Readable.fromWeb(upstream.body as import("node:stream/web").ReadableStream<Uint8Array>);
+    response.once("close", () => {
+      cleanupAbortHooks();
+      if (!response.writableEnded) {
+        stream.destroy();
+        upstream.body?.cancel().catch(() => undefined);
+      }
+    });
+    stream.on("error", () => {
+      if (!response.headersSent) {
+        response.status(502).end();
+      } else {
+        response.destroy();
+      }
+    });
+    stream.on("end", cleanupAbortHooks);
+    stream.pipe(response);
   }
 
   /**
@@ -103,7 +150,7 @@ export class RoomController {
    * @returns WebVTT 字幕。
    */
   @Get(":roomCode/subtitle.vtt")
-  async subtitle(@Param("roomCode") roomCode: string, @Res() response: Response): Promise<void> {
+  async subtitle(@Param("roomCode") roomCode: string, @Res() response: ExpressResponse): Promise<void> {
     const subtitle = this.rooms.getCurrentSubtitle(roomCode);
     if (!subtitle) {
       logInfo("RoomController", "房间未选择字幕，返回空 WebVTT", { roomCode });

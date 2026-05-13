@@ -194,7 +194,7 @@ describe("RoomService", () => {
 
     expect(updated.currentVideo).toEqual({
       ...video,
-      playUrl: `/api/rooms/${room.roomCode}/video`
+      playUrl: `/api/rooms/${room.roomCode}/video?path=${encodeURIComponent(video.filePath)}`
     });
     expect(updated.currentSubtitle).toBeNull();
     expect(updated.playbackState.positionSeconds).toBe(0);

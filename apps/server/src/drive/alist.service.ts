@@ -119,9 +119,10 @@ export class AlistService {
    *
    * @param path 文件路径。
    * @param range 浏览器 Range 请求头，用于支持拖动进度和分片加载。
+   * @param signal 客户端断开时取消上游读取，避免长连接堆积。
    * @returns AList/OpenList 或其后端存储返回的文件响应。
    */
-  async openFileStream(path: string, range?: string): Promise<Response> {
+  async openFileStream(path: string, range?: string, signal?: AbortSignal): Promise<Response> {
     const safePath = this.assertAllowedPath(path);
     const url = await this.getFileAccessUrl(safePath);
     const headers: Record<string, string> = {};
@@ -132,7 +133,7 @@ export class AlistService {
       Object.assign(headers, await this.authHeaders());
     }
 
-    const response = await fetch(url, { headers });
+    const response = await fetch(url, { headers, signal });
     if (!response.ok && response.status !== 416) {
       logWarn("AlistService", "AList/OpenList 文件读取失败", {
         path: safePath,

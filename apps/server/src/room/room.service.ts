@@ -275,9 +275,10 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     const room = this.getStoredRoom(roomCode);
     this.assertDirectMode(room);
     const video = await this.alist.getVideo(filePath);
+    const playUrl = `/api/rooms/${room.roomCode}/video?path=${encodeURIComponent(video.filePath)}`;
     room.currentVideo = {
       ...video,
-      playUrl: `/api/rooms/${room.roomCode}/video`
+      playUrl
     };
     room.currentSubtitle = null;
     room.playbackState = this.nextPlaybackState(room, {
@@ -384,13 +385,13 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
    * @param range 浏览器 Range 请求头。
    * @returns 上游文件响应。
    */
-  async openCurrentVideoStream(roomCode: string, range?: string): Promise<Response> {
+  async openCurrentVideoStream(roomCode: string, range?: string, signal?: AbortSignal): Promise<Response> {
     const room = this.getStoredRoom(roomCode);
     this.assertDirectMode(room);
     if (!room.currentVideo) {
       throw new NotFoundException("房间尚未选择视频");
     }
-    return this.alist.openFileStream(room.currentVideo.filePath, range);
+    return this.alist.openFileStream(room.currentVideo.filePath, range, signal);
   }
 
   /**

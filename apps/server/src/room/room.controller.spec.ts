@@ -3,18 +3,19 @@ import { RoomController } from "./room.controller.js";
 
 describe("RoomController", () => {
   it("当前视频端点代理上游视频流并保留 Range 响应头", async () => {
+    const openCurrentVideoStream = vi.fn(async () => ({
+      status: 206,
+      headers: new Headers({
+        "accept-ranges": "bytes",
+        "content-length": "100",
+        "content-range": "bytes 0-99/1000",
+        "content-type": "video/mp4"
+      }),
+      body: null
+    }));
     const controller = new RoomController(
       {
-        openCurrentVideoStream: vi.fn(async () => ({
-          status: 206,
-          headers: new Headers({
-            "accept-ranges": "bytes",
-            "content-length": "100",
-            "content-range": "bytes 0-99/1000",
-            "content-type": "video/mp4"
-          }),
-          body: null
-        }))
+        openCurrentVideoStream
       } as never,
       {} as never
     );
@@ -22,6 +23,7 @@ describe("RoomController", () => {
 
     await controller.video("1234", "bytes=0-99", response as never);
 
+    expect(openCurrentVideoStream).toHaveBeenCalledWith("1234", "bytes=0-99", expect.any(AbortSignal));
     expect(response.status).toHaveBeenCalledWith(206);
     expect(response.setHeader).toHaveBeenCalledWith("content-range", "bytes 0-99/1000");
     expect(response.setHeader).toHaveBeenCalledWith("content-length", "100");
@@ -56,12 +58,21 @@ describe("RoomController", () => {
 
 function createResponse() {
   const response = {
+    req: {
+      once: vi.fn(),
+      off: vi.fn()
+    },
     redirect: vi.fn(),
     status: vi.fn(() => response),
     setHeader: vi.fn(),
     type: vi.fn(() => response),
     send: vi.fn(),
-    end: vi.fn()
+    end: vi.fn(),
+    once: vi.fn(),
+    off: vi.fn(),
+    destroy: vi.fn(),
+    writableEnded: false,
+    headersSent: false
   };
   return response;
 }
