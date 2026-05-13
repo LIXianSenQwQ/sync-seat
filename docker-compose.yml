@@ -6,14 +6,14 @@ services:
     env_file:
       - .env
     environment:
-      # 容器内应用监听端口，Nginx 通过服务名访问该端口。
-      SERVER_PORT: ${SERVER_PORT:-3000}
+      # 容器内应用监听端口需与 nginx.conf 的 app:3000 upstream 保持一致。
+      SERVER_PORT: 3000
       # 生产同源部署时应设置为 https://你的域名，供 CORS 和 Socket.IO 握手使用。
       WEB_ORIGIN: ${WEB_ORIGIN:-https://example.com}
       # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
       WEB_DIST_PATH: /app/apps/web/dist
     expose:
-      - "${SERVER_PORT:-3000}"
+      - "3000"
 
   nginx:
     image: nginx:alpine
@@ -46,9 +46,9 @@ services:
     env_file:
       - .env
     environment:
-      - Ali_Key=${Ali_Key:-your-ali-key}
-      - Ali_Secret=${Ali_Secret:-your-ali-secret}
-      - TARGET_DOMAIN=${TARGET_DOMAIN:-xxx.91since.com}
+      - Ali_Key=${Ali_Key:?Set Ali_Key in .env for DNS-01 certificate issuance}
+      - Ali_Secret=${Ali_Secret:?Set Ali_Secret in .env for DNS-01 certificate issuance}
+      - TARGET_DOMAIN=${TARGET_DOMAIN:?Set TARGET_DOMAIN in .env for certificate issuance}
     volumes:
       - ./letsencrypt:/acme.sh
       - /var/run/docker.sock:/var/run/docker.sock
