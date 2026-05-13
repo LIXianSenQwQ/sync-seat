@@ -10,6 +10,11 @@ services:
       SERVER_PORT: 3000
       # 生产同源部署时应设置为 https://你的域名，供 CORS 和 Socket.IO 握手使用。
       WEB_ORIGIN: ${WEB_ORIGIN:-https://example.com}
+      # 房主推流按 IPv6 直连、IPv4 NAT 打洞、TURN 中继的顺序尝试连接。
+      WEBRTC_STUN_URLS: ${WEBRTC_STUN_URLS:-stun:stun.l.google.com:19302}
+      WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS-}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME-}
+      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD-}
       # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
       WEB_DIST_PATH: /app/apps/web/dist
     expose:
@@ -83,3 +88,23 @@ services:
 
         echo "[Init] 启动 cron 守护进程..."
         exec crond -f
+
+  turn:
+    image: coturn/coturn:latest
+    container_name: sync-seat-turn
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    command:
+      - --listening-port=${TURN_PORT:-3478}
+      - --realm=${TURN_REALM:?Set TURN_REALM in .env for TURN authentication}
+      - --server-name=${TURN_REALM:?Set TURN_REALM in .env for TURN authentication}
+      - --external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in .env to your router public IPv4}
+      - --user=${WEBRTC_TURN_USERNAME:?Set WEBRTC_TURN_USERNAME in .env}:${WEBRTC_TURN_PASSWORD:?Set WEBRTC_TURN_PASSWORD in .env}
+      - --min-port=49160
+      - --max-port=49200
+      - --fingerprint
+      - --lt-cred-mech
+      - --no-cli
+      - --no-multicast-peers

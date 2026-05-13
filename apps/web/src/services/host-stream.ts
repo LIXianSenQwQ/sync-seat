@@ -1,18 +1,31 @@
 import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 import {
   canReplaceMdnsCandidate,
+  candidateMatchesHostStreamStage,
   createInitialHostStreamIceDiagnostics,
   parseIceCandidate,
   parseIceCandidateStats,
   replaceMdnsCandidateAddress,
   updateDiagnosticsConnectionState,
   updateDiagnosticsSelectedCandidate,
+  updateDiagnosticsStage,
   updateDiagnosticsWithCandidate,
+  type HostStreamIceStage,
   type HostStreamIceDiagnostics
 } from "./ice-diagnostics";
 
 type HostSignalType = "offer" | "answer" | "ice_candidate";
 export type HostStreamQuality = "original" | "standard" | "smooth";
+
+interface HostStreamDescriptionPayload {
+  description: RTCSessionDescriptionInit;
+  stage: HostStreamIceStage;
+}
+
+interface HostStreamCandidatePayload {
+  candidate: RTCIceCandidateInit;
+  stage: HostStreamIceStage;
+}
 
 interface QualityProfile {
   label: string;
@@ -50,6 +63,11 @@ const QUALITY_PROFILES: Record<HostStreamQuality, QualityProfile> = {
   }
 };
 
+/** 房主推流按网络成本从低到高尝试的 ICE 阶段。 */
+const ICE_STAGE_ORDER: HostStreamIceStage[] = ["ipv6", "ipv4", "relay"];
+/** 每个阶段等待浏览器 ICE 检查稳定成功的时间，超时后进入下一阶段。 */
+const ICE_STAGE_TIMEOUT_MS = 8_000;
+
 type ConfigurableSendParameters = RTCRtpSendParameters & {
   degradationPreference?: "maintain-framerate" | "maintain-resolution" | "balanced";
 };
@@ -69,8 +87,9 @@ export class HostStreamMesh {
   private remoteStream: MediaStream | null = null;
   private peers = new Map<string, RTCPeerConnection>();
   private peerInitiators = new Map<string, boolean>();
+  private peerStages = new Map<string, HostStreamIceStage>();
   private iceDiagnostics = new Map<string, HostStreamIceDiagnostics>();
-  private restartedPeers = new Set<string>();
+  private stageTimers = new Map<string, number>();
   private videoSenders = new Set<RTCRtpSender>();
   private sourceVideoHeight = 0;
   private quality: HostStreamQuality = "original";
@@ -133,26 +152,44 @@ export class HostStreamMesh {
    */
   async handleSignal(fromMemberId: string, signalType: HostSignalType, payload: unknown): Promise<void> {
     console.log(`[HostStream] 收到信令 (${signalType}) from ${fromMemberId}`);
-    const peer = await this.ensurePeer(fromMemberId, false);
     if (signalType === "offer") {
-      console.log(`[HostStream] 处理 offer from ${fromMemberId}，设置远端描述并创建应答`);
-      await peer.setRemoteDescription(payload as RTCSessionDescriptionInit);
+      const { description, stage } = this.resolveDescriptionPayload(payload);
+      const currentStage = this.peerStages.get(fromMemberId);
+      if (currentStage && this.shouldIgnoreStaleStage(currentStage, stage)) {
+        console.warn(`[HostStream] 忽略过期 offer from ${fromMemberId}，stage=${stage}`);
+        return;
+      }
+      const peer = await this.ensurePeerForRemoteOffer(fromMemberId, stage);
+      console.log(`[HostStream] 处理 offer from ${fromMemberId}，stage=${stage}，设置远端描述并创建应答`);
+      await peer.setRemoteDescription(description);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      this.sendSignal(fromMemberId, "answer", answer);
+      this.sendSignal(fromMemberId, "answer", this.createDescriptionPayload(answer, stage));
       await this.flushPendingCandidates(fromMemberId, peer);
       console.log(`[HostStream] 应答已发送 to ${fromMemberId}`);
     }
     if (signalType === "answer") {
-      console.log(`[HostStream] 处理 answer from ${fromMemberId}，设置远端描述`);
-      await peer.setRemoteDescription(payload as RTCSessionDescriptionInit);
+      const { description, stage } = this.resolveDescriptionPayload(payload);
+      const peer = this.peers.get(fromMemberId);
+      if (!peer || this.peerStages.get(fromMemberId) !== stage) {
+        console.warn(`[HostStream] 忽略过期 answer from ${fromMemberId}，stage=${stage}`);
+        return;
+      }
+      console.log(`[HostStream] 处理 answer from ${fromMemberId}，stage=${stage}，设置远端描述`);
+      await peer.setRemoteDescription(description);
       await this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "ice_candidate" && payload) {
-      const candidate = payload as RTCIceCandidateInit;
+      const { candidate, stage } = this.resolveCandidatePayload(payload);
+      const currentStage = this.peerStages.get(fromMemberId);
+      if (currentStage && this.shouldIgnoreStaleStage(currentStage, stage)) {
+        console.warn(`[HostStream] 忽略过期 ICE candidate from ${fromMemberId}，stage=${stage}`);
+        return;
+      }
+      const peer = await this.ensurePeerForRemoteCandidate(fromMemberId, stage);
       this.recordCandidate(fromMemberId, candidate);
       if (peer.remoteDescription) {
-        await peer.addIceCandidate(candidate);
+        await this.addRemoteCandidate(fromMemberId, peer, candidate);
       } else {
         console.log(`[HostStream] ICE candidate 提前到达 (${fromMemberId})，加入待处理队列`);
         const queue = this.pendingCandidates.get(fromMemberId) ?? [];
@@ -167,16 +204,26 @@ export class HostStreamMesh {
     if (!queue) return;
     this.pendingCandidates.delete(memberId);
     for (const candidate of queue) {
+      await this.addRemoteCandidate(memberId, peer, candidate);
+    }
+  }
+
+  private async addRemoteCandidate(memberId: string, peer: RTCPeerConnection, candidate: RTCIceCandidateInit): Promise<void> {
+    try {
       await peer.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn(`[HostStream] 忽略当前 ICE 阶段不兼容的远端候选 (${memberId}):`, err);
     }
   }
 
   stop(): void {
+    this.stageTimers.forEach((timer) => window.clearTimeout(timer));
+    this.stageTimers.clear();
     this.peers.forEach((peer) => peer.close());
     this.peers.clear();
     this.peerInitiators.clear();
+    this.peerStages.clear();
     this.iceDiagnostics.clear();
-    this.restartedPeers.clear();
     this.videoSenders.clear();
     this.localStream = null;
     this.remoteStream = null;
@@ -187,11 +234,49 @@ export class HostStreamMesh {
     const existing = this.peers.get(targetMemberId);
     if (existing) return existing;
 
-    const peer = new RTCPeerConnection({ iceServers: this.iceServers, iceTransportPolicy: "all" });
+    return this.createPeer(targetMemberId, initiator, "ipv6");
+  }
+
+  private async ensurePeerForRemoteOffer(targetMemberId: string, stage: HostStreamIceStage): Promise<RTCPeerConnection> {
+    const existing = this.peers.get(targetMemberId);
+    if (existing && this.peerStages.get(targetMemberId) === stage) return existing;
+    if (existing) {
+      this.clearStageTimer(targetMemberId);
+      existing.close();
+      this.peers.delete(targetMemberId);
+      this.pendingCandidates.delete(targetMemberId);
+    }
+    return this.createPeer(targetMemberId, false, stage);
+  }
+
+  private async ensurePeerForRemoteCandidate(targetMemberId: string, stage: HostStreamIceStage): Promise<RTCPeerConnection> {
+    const existing = this.peers.get(targetMemberId);
+    if (existing && this.peerStages.get(targetMemberId) === stage) return existing;
+    if (existing) {
+      if (this.shouldIgnoreStaleStage(this.peerStages.get(targetMemberId) ?? "ipv6", stage)) {
+        return existing;
+      }
+      this.clearStageTimer(targetMemberId);
+      existing.close();
+      this.peers.delete(targetMemberId);
+      this.pendingCandidates.delete(targetMemberId);
+    }
+    return this.createPeer(targetMemberId, false, stage);
+  }
+
+  private shouldIgnoreStaleStage(currentStage: HostStreamIceStage, incomingStage: HostStreamIceStage): boolean {
+    return ICE_STAGE_ORDER.indexOf(incomingStage) < ICE_STAGE_ORDER.indexOf(currentStage);
+  }
+
+  private async createPeer(targetMemberId: string, initiator: boolean, stage: HostStreamIceStage): Promise<RTCPeerConnection> {
+    const peer = new RTCPeerConnection({ iceServers: this.resolveIceServers(stage), iceTransportPolicy: "all" });
     this.peers.set(targetMemberId, peer);
     this.peerInitiators.set(targetMemberId, initiator);
+    this.peerStages.set(targetMemberId, stage);
+    this.pendingCandidates.delete(targetMemberId);
+    this.updateDiagnostics(targetMemberId, (diagnostics) => updateDiagnosticsStage(diagnostics, stage));
     this.ensureDiagnostics(targetMemberId);
-    console.log(`[HostStream] 创建 PeerConnection (${targetMemberId})，initiator=${initiator}`);
+    console.log(`[HostStream] 创建 PeerConnection (${targetMemberId})，initiator=${initiator}，stage=${stage}`);
 
     // 步骤1：房主把本地视频轨道推给观众；观众没有本地轨道也能回 answer。
     const tracks = this.localStream?.getTracks() ?? [];
@@ -216,23 +301,28 @@ export class HostStreamMesh {
 
     peer.onicecandidate = (event) => {
       if (event.candidate) {
+        const stageNow = this.peerStages.get(targetMemberId) ?? stage;
         const parsed = this.recordCandidate(targetMemberId, event.candidate);
         // Chrome mDNS 隐藏把局域网 IP 换成 .local 地址
         // address 可能为 null 或直接就是 .local 主机名（取决于 Chrome 版本）
         if (this.localIp && canReplaceMdnsCandidate(event.candidate, this.localIp)) {
           const fixedCandidate = replaceMdnsCandidateAddress(event.candidate, this.localIp);
-          this.recordCandidate(targetMemberId, fixedCandidate);
+          const fixedParsed = this.recordCandidate(targetMemberId, fixedCandidate);
           console.log(`[HostStream] ICE 候选 (${targetMemberId}, host): 修复 mDNS → ${this.localIp}`);
-          this.sendSignal(targetMemberId, "ice_candidate", fixedCandidate);
+          if (candidateMatchesHostStreamStage(stageNow, fixedParsed)) {
+            this.sendSignal(targetMemberId, "ice_candidate", this.createCandidatePayload(fixedCandidate, stageNow));
+          }
           return;
         }
         if (parsed?.isMdns && this.localIp) {
           console.log(`[HostStream] ICE 候选 (${targetMemberId}, host): 保留 mDNS，whoami 返回的 ${this.localIp} 不是私有 IPv4`);
         }
         console.log(
-          `[HostStream] ICE 候选 (${targetMemberId}, ${parsed?.type ?? "unknown"}): ${parsed?.protocol ?? "unknown"} ${parsed?.address ?? "unknown"}:${parsed?.port ?? ""}`
+          `[HostStream] ICE 候选 (${targetMemberId}, ${parsed?.type ?? "unknown"}, stage=${stageNow}): ${parsed?.protocol ?? "unknown"} ${parsed?.address ?? "unknown"}:${parsed?.port ?? ""}`
         );
-        this.sendSignal(targetMemberId, "ice_candidate", event.candidate);
+        if (candidateMatchesHostStreamStage(stageNow, parsed)) {
+          this.sendSignal(targetMemberId, "ice_candidate", this.createCandidatePayload(event.candidate, stageNow));
+        }
       }
     };
 
@@ -242,19 +332,43 @@ export class HostStreamMesh {
       this.onConnectionState?.(targetMemberId, peer.iceConnectionState);
       this.updateDiagnostics(targetMemberId, (diagnostics) => updateDiagnosticsConnectionState(diagnostics, peer.iceConnectionState));
       if (peer.iceConnectionState === "connected" || peer.iceConnectionState === "completed") {
+        this.clearStageTimer(targetMemberId);
         void this.refreshSelectedCandidate(targetMemberId, peer);
       }
       if (peer.iceConnectionState === "failed") {
-        void this.restartIceOnce(targetMemberId, peer);
+        void this.fallbackIceStage(targetMemberId, peer);
       }
     };
 
     if (initiator) {
       const offer = await peer.createOffer();
       await peer.setLocalDescription(offer);
-      this.sendSignal(targetMemberId, "offer", offer);
+      this.sendSignal(targetMemberId, "offer", this.createDescriptionPayload(offer, stage));
+      this.armStageTimer(targetMemberId, peer);
     }
     return peer;
+  }
+
+  private createDescriptionPayload(description: RTCSessionDescriptionInit, stage: HostStreamIceStage): HostStreamDescriptionPayload {
+    return { description, stage };
+  }
+
+  private createCandidatePayload(candidate: RTCIceCandidateInit, stage: HostStreamIceStage): HostStreamCandidatePayload {
+    return { candidate, stage };
+  }
+
+  private resolveDescriptionPayload(payload: unknown): HostStreamDescriptionPayload {
+    const envelope = payload as Partial<HostStreamDescriptionPayload> | null;
+    const description = envelope?.description ?? (payload as RTCSessionDescriptionInit);
+    const stage = envelope?.stage === "ipv4" || envelope?.stage === "relay" ? envelope.stage : "ipv6";
+    return { description, stage };
+  }
+
+  private resolveCandidatePayload(payload: unknown): HostStreamCandidatePayload {
+    const envelope = payload as Partial<HostStreamCandidatePayload> | null;
+    const candidate = envelope?.candidate ?? (payload as RTCIceCandidateInit);
+    const stage = envelope?.stage === "ipv4" || envelope?.stage === "relay" ? envelope.stage : "ipv6";
+    return { candidate, stage };
   }
 
   private recordCandidate(memberId: string, candidate: RTCIceCandidateInit | RTCIceCandidate): ReturnType<typeof parseIceCandidate> {
@@ -266,7 +380,7 @@ export class HostStreamMesh {
   private ensureDiagnostics(memberId: string): HostStreamIceDiagnostics {
     const existing = this.iceDiagnostics.get(memberId);
     if (existing) return existing;
-    const diagnostics = createInitialHostStreamIceDiagnostics();
+    const diagnostics = createInitialHostStreamIceDiagnostics(this.peerStages.get(memberId) ?? "ipv6");
     this.iceDiagnostics.set(memberId, diagnostics);
     this.onDiagnostics?.(memberId, diagnostics);
     return diagnostics;
@@ -282,19 +396,53 @@ export class HostStreamMesh {
     return next;
   }
 
-  private async restartIceOnce(memberId: string, peer: RTCPeerConnection): Promise<void> {
-    if (!this.peerInitiators.get(memberId) || this.restartedPeers.has(memberId) || peer.signalingState !== "stable") return;
-    this.restartedPeers.add(memberId);
-    this.updateDiagnostics(memberId, (diagnostics) => updateDiagnosticsConnectionState(diagnostics, peer.iceConnectionState, true));
-    try {
-      peer.restartIce();
-      const offer = await peer.createOffer({ iceRestart: true });
-      await peer.setLocalDescription(offer);
-      this.sendSignal(memberId, "offer", offer);
-      console.warn(`[HostStream] ICE 连接失败，已向 ${memberId} 发起一次 ICE restart`);
-    } catch (err) {
-      console.warn(`[HostStream] ICE restart 失败 (${memberId}):`, err);
+  private resolveIceServers(stage: HostStreamIceStage): IceServerConfig[] {
+    if (stage === "ipv6") return [];
+    if (stage === "ipv4") return this.iceServers.filter((server) => this.resolveServerUrls(server).some((url) => url.startsWith("stun:")));
+    return this.iceServers.filter((server) => this.resolveServerUrls(server).some((url) => url.startsWith("turn:") || url.startsWith("turns:")));
+  }
+
+  private resolveServerUrls(server: IceServerConfig): string[] {
+    return Array.isArray(server.urls) ? server.urls : [server.urls];
+  }
+
+  private armStageTimer(memberId: string, peer: RTCPeerConnection): void {
+    this.clearStageTimer(memberId);
+    const timer = window.setTimeout(() => {
+      if (peer.iceConnectionState !== "connected" && peer.iceConnectionState !== "completed") {
+        void this.fallbackIceStage(memberId, peer);
+      }
+    }, ICE_STAGE_TIMEOUT_MS);
+    this.stageTimers.set(memberId, timer);
+  }
+
+  private clearStageTimer(memberId: string): void {
+    const timer = this.stageTimers.get(memberId);
+    if (timer) window.clearTimeout(timer);
+    this.stageTimers.delete(memberId);
+  }
+
+  private async fallbackIceStage(memberId: string, peer: RTCPeerConnection): Promise<void> {
+    if (!this.peerInitiators.get(memberId)) return;
+    if (this.peers.get(memberId) !== peer) return;
+    const currentStage = this.peerStages.get(memberId) ?? "ipv6";
+    const nextStage = this.resolveNextAvailableStage(currentStage);
+    if (!nextStage) return;
+    this.clearStageTimer(memberId);
+    peer.close();
+    this.peers.delete(memberId);
+    this.pendingCandidates.delete(memberId);
+    console.warn(`[HostStream] ICE ${currentStage} 阶段失败，回落到 ${nextStage} 阶段 (${memberId})`);
+    await this.createPeer(memberId, true, nextStage);
+  }
+
+  private resolveNextAvailableStage(currentStage: HostStreamIceStage): HostStreamIceStage | null {
+    const currentIndex = ICE_STAGE_ORDER.indexOf(currentStage);
+    for (const stage of ICE_STAGE_ORDER.slice(currentIndex + 1)) {
+      if (stage === "ipv6" || this.resolveIceServers(stage).length > 0) return stage;
+      console.warn(`[HostStream] ${stage} 阶段缺少 ICE 服务器配置，跳过该阶段`);
     }
+    return null;
   }
 
   private async refreshSelectedCandidate(memberId: string, peer: RTCPeerConnection): Promise<void> {

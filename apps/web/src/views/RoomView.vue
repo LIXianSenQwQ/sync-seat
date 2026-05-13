@@ -59,9 +59,12 @@ const isHostStreamMode = computed(() => room.value?.watchMode === "host-stream")
 const hostStreamDiagnosticLabels = computed(() => Object.entries(hostStreamDiagnostics.value).map(([memberId, diagnostics]) => {
   const member = members.value.find((item) => item.memberId === memberId);
   const name = member?.nickname ?? memberId;
-  const restartText = diagnostics.restarted ? "，已重试 ICE" : "";
-  return `${name}: ${describeHostStreamRoute(diagnostics)} (${diagnostics.state}${restartText})`;
+  const stageText = diagnostics.stage === "ipv6" ? "IPv6 优先" : diagnostics.stage === "ipv4" ? "IPv4 打洞" : "TURN 中继";
+  return `${name}: ${describeHostStreamRoute(diagnostics)} (${stageText}，${diagnostics.state})`;
 }));
+const hasTerminalHostStreamError = computed(() =>
+  Object.values(hostStreamDiagnostics.value).some((diagnostics) => diagnostics.stage === "relay" && diagnostics.state === "failed")
+);
 
 async function join(): Promise<void> {
   error.value = "";
@@ -578,8 +581,8 @@ onBeforeUnmount(() => {
               <p v-if="hostStreamDiagnosticLabels.length" class="side-note ice-diagnostics">
                 {{ hostStreamDiagnosticLabels.join('；') }}
               </p>
-              <p v-if="Object.values(hostStreamIceState).some(s => s === 'failed' || s === 'disconnected')" class="error">
-                P2P 连接异常，请检查双方 NAT 类型、STUN 是否可达，以及公网访问是否使用 HTTPS；复杂 NAT 下需要配置 TURN 中继服务器
+              <p v-if="hasTerminalHostStreamError" class="error">
+                P2P 与 TURN 中继均连接失败，请检查双方网络、防火墙、STUN/TURN 配置，以及公网访问是否使用 HTTPS
               </p>
             </template>
             <p v-else class="side-note">房主尚未开始推流</p>
