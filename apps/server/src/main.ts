@@ -9,6 +9,8 @@ import { AppModule } from "./app.module.js";
  */
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  // 信任 Vite 代理转发的 X-Forwarded-For 头，以便获取客户端真实 IP
+  app.getHttpAdapter().getInstance().set("trust proxy", 1);
   const origin = process.env.WEB_ORIGIN ?? "http://localhost:5173";
 
   // 步骤1：允许前端开发服务器访问 REST API 和 WebSocket 握手。

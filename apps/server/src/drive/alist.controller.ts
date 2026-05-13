@@ -1,4 +1,5 @@
-import { Controller, Get, Query } from "@nestjs/common";
+import { Controller, Get, Query, Req } from "@nestjs/common";
+import type { Request } from "express";
 import type { DriveEntry, IceServerConfig } from "@sync-seat/shared";
 import { EnvConfig } from "../config/env.js";
 import { AlistService } from "./alist.service.js";
@@ -45,5 +46,17 @@ export class AlistController {
   @Get("ice-servers")
   iceServers(): IceServerConfig[] {
     return this.env.getIceServers();
+  }
+
+  /**
+   * 返回客户端真实 IP，用于修复 Chrome mDNS 隐藏导致的局域网 ICE 连接失败。
+   *
+   * @param req Express 请求对象，trust proxy 后 req.ip 为真实客户端 IP。
+   */
+  @Get("whoami")
+  whoami(@Req() req: Request): { ip: string } {
+    // trust proxy 后 req.ip 为代理转发的真实客户端 IP，去掉 IPv4-mapped IPv6 前缀
+    const ip = (req.ip ?? "unknown").replace(/^::ffff:/i, "");
+    return { ip };
   }
 }

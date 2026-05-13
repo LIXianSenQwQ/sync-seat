@@ -39,5 +39,9 @@ export const api = {
   },
   getIceServers(): Promise<IceServerConfig[]> {
     return request("/api/drive/ice-servers");
+  },
+  /** 获取客户端真实 IP，用于修复 Chrome mDNS 隐藏 */
+  getClientIp(): Promise<{ ip: string }> {
+    return request("/api/drive/whoami");
   }
 };

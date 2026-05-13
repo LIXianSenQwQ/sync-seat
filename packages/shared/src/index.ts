@@ -166,4 +166,5 @@ export type ServerRoomEvent =
   | { type: "voice_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
   | { type: "host_stream_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
   | ({ type: "host_control_command"; fromMemberId: string } & HostControlCommand)
-  | { type: "room_closed"; reason: string };
+  | { type: "room_closed"; reason: string }
+  | { type: "client_ip"; ip: string };

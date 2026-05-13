@@ -30,6 +30,10 @@ const muted = ref(false);
 const volume = ref(1);
 const applyingRemote = ref(false);
 const hostStream = shallowRef<HostStreamMesh | null>(null);
+/** 防止 ensureHostStream 并发调用时创建多个 HostStreamMesh 实例 */
+let hostStreamPromise: Promise<HostStreamMesh> | null = null;
+/** 服务端返回的客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏 */
+let clientIp = "";
 const localVideoUrl = ref("");
 const localVideoName = ref("");
 const remoteStreamReady = ref(false);
@@ -52,6 +56,11 @@ async function join(): Promise<void> {
       password: password.value || undefined
     });
     connectSocket();
+    // 获取客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏
+    api.getClientIp().then(({ ip }) => {
+      console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
+      clientIp = ip;
+    }).catch(() => undefined);
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -71,6 +80,10 @@ async function restoreIfMember(): Promise<boolean> {
       nickname: identity.nickname
     });
     connectSocket();
+    api.getClientIp().then(({ ip }) => {
+      console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
+      clientIp = ip;
+    }).catch(() => undefined);
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -107,7 +120,10 @@ function connectSocket(): void {
       void voice.value?.handleSignal(event.fromMemberId, event.signalType, event.payload);
     },
     (event) => {
-      void ensureHostStream().then((mesh) => mesh.handleSignal(event.fromMemberId, event.signalType, event.payload));
+      void ensureHostStream().then(
+        (mesh) => mesh.handleSignal(event.fromMemberId, event.signalType, event.payload),
+        (err) => console.error("[HostStream] ensureHostStream 初始化失败:", err)
+      );
     },
     (event) => {
       applyHostControl(event);
@@ -168,36 +184,45 @@ function onRateChange(): void {
 
 async function ensureHostStream(): Promise<HostStreamMesh> {
   if (hostStream.value) return hostStream.value;
-  const iceServers = await api.getIceServers();
-  hostStream.value = new HostStreamMesh(
-    iceServers,
-    identity.memberId,
-    (targetMemberId, type, payload) => {
-      send({
-        type: type === "offer" ? "host_stream_offer" : type === "answer" ? "host_stream_answer" : "host_stream_ice_candidate",
-        roomCode: roomCode.value,
-        memberId: identity.memberId,
-        targetMemberId,
-        ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
-      } as ClientRoomEvent);
-    },
-    async (stream) => {
-      remoteStreamReady.value = true;
-      await nextTick();
-      if (remoteStreamVideoRef.value) {
-        remoteStreamVideoRef.value.srcObject = stream;
-        await remoteStreamVideoRef.value.play().catch(() => undefined);
-      }
-    },
-    (memberId, state) => {
-      hostStreamIceState.value = { ...hostStreamIceState.value, [memberId]: state };
-      // 连接失败时给出明确提示
-      if (state === "failed" || state === "disconnected") {
-        console.warn(`[HostStream] 与 ${memberId} 的 ICE 连接失败 (state: ${state})，请检查网络或配置 TURN 中继`);
-      }
-    }
-  );
-  return hostStream.value;
+  // 防止并发信令到达时创建多个 HostStreamMesh 实例导致 ICE candidates 分发到错误实例
+  if (!hostStreamPromise) {
+    hostStreamPromise = (async () => {
+      const iceServers = await api.getIceServers();
+      console.log(`[HostStream] ICE 服务器配置已获取，共 ${iceServers.length} 台`);
+      hostStream.value = new HostStreamMesh(
+        iceServers,
+        identity.memberId,
+        clientIp,
+        (targetMemberId, type, payload) => {
+          send({
+            type: type === "offer" ? "host_stream_offer" : type === "answer" ? "host_stream_answer" : "host_stream_ice_candidate",
+            roomCode: roomCode.value,
+            memberId: identity.memberId,
+            targetMemberId,
+            ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
+          } as ClientRoomEvent);
+        },
+        async (stream) => {
+          console.log(`[HostStream] 远端媒体流已就绪，stream id=${stream.id}`);
+          remoteStreamReady.value = true;
+          await nextTick();
+          if (remoteStreamVideoRef.value) {
+            remoteStreamVideoRef.value.srcObject = stream;
+            await remoteStreamVideoRef.value.play().catch(() => undefined);
+          }
+        },
+        (memberId, state) => {
+          hostStreamIceState.value = { ...hostStreamIceState.value, [memberId]: state };
+          // 连接失败时给出明确提示
+          if (state === "failed" || state === "disconnected") {
+            console.warn(`[HostStream] 与 ${memberId} 的 ICE 连接失败 (state: ${state})，请检查网络或配置 TURN 中继`);
+          }
+        }
+      );
+      return hostStream.value;
+    })();
+  }
+  return hostStreamPromise;
 }
 
 function selectLocalVideo(event: Event): void {
@@ -214,9 +239,18 @@ function selectLocalVideo(event: Event): void {
 async function startHostStream(): Promise<void> {
   if (!hostVideoRef.value || !localVideoName.value || !room.value) return;
   try {
+    const video = hostVideoRef.value;
+    // 等待视频元数据加载完成，确保 captureStream 能获取音视频轨道
+    if (video.readyState < 1) {
+      await new Promise<void>((resolve) => {
+        video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+      });
+    }
+    // 先播放，让浏览器开始解码渲染，再捕获流，确保流中有活跃轨道
+    await video.play();
     const mesh = await ensureHostStream();
-    mesh.captureFromVideo(hostVideoRef.value);
-    await hostVideoRef.value.play();
+    const capturedStream = mesh.captureFromVideo(video);
+    console.log(`[HostStream] 已从视频采集媒体流，tracks=${capturedStream.getTracks().length}`);
     send({ type: "host_stream_start", roomCode: roomCode.value, memberId: identity.memberId, fileName: localVideoName.value });
     await mesh.publishToMembers(room.value.members);
   } catch (err) {
@@ -226,6 +260,8 @@ async function startHostStream(): Promise<void> {
 
 function stopHostStream(): void {
   hostStream.value?.stop();
+  hostStream.value = null;
+  hostStreamPromise = null;
   send({ type: "host_stream_stop", roomCode: roomCode.value, memberId: identity.memberId });
 }
 
@@ -310,6 +346,8 @@ onBeforeUnmount(() => {
   socket.close();
   voice.value?.leave();
   hostStream.value?.stop();
+  hostStream.value = null;
+  hostStreamPromise = null;
   if (localVideoUrl.value) {
     URL.revokeObjectURL(localVideoUrl.value);
   }
