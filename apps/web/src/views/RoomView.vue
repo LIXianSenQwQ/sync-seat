@@ -84,7 +84,8 @@ async function join(): Promise<void> {
 async function restoreIfMember(): Promise<boolean> {
   try {
     const current = await api.getRoom(roomCode.value);
-    if (!current.members.some((member) => member.memberId === identity.memberId)) {
+    const alreadyJoined = current.members.some((member) => member.memberId === identity.memberId);
+    if (!alreadyJoined && current.hasPassword) {
       return false;
     }
     room.value = await api.joinRoom(roomCode.value, {

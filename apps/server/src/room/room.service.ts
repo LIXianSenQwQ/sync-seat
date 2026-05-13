@@ -55,6 +55,7 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       roomId: randomUUID(),
       roomCode,
       watchMode: normalizedMode,
+      hasPassword: Boolean(password),
       ownerId: memberId,
       members: [
         {

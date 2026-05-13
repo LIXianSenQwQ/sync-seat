@@ -18,6 +18,7 @@ export function clonePublicRoom(room: StoredRoom): PublicRoom {
     roomId: room.roomId,
     roomCode: room.roomCode,
     watchMode: room.watchMode,
+    hasPassword: Boolean(room.passwordHash),
     ownerId: room.ownerId,
     members: room.members.map((member: RoomMember) => ({ ...member })),
     currentVideo: room.currentVideo ? { ...room.currentVideo } : null,

@@ -104,6 +104,7 @@ export interface RoomState {
   roomId: string;
   roomCode: string;
   watchMode: WatchMode;
+  hasPassword: boolean;
   ownerId: string;
   members: RoomMember[];
   currentVideo: CurrentVideo | null;

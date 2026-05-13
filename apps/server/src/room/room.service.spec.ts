@@ -31,11 +31,20 @@ describe("RoomService", () => {
     const room = service.createRoom("m1", "清羽", "secret");
 
     expect(room.watchMode).toBe("direct");
+    expect(room.hasPassword).toBe(true);
     expect(room.roomCode).toMatch(/^\d{4}$/);
     expect(room.hostStreamState).toBeNull();
     expect(() => service.joinRoom(room.roomCode, "m2", "朋友", "wrong")).toThrow(ForbiddenException);
     const joined = service.joinRoom(room.roomCode, "m2", "朋友", "secret").room;
     expect(joined.members).toHaveLength(2);
+  });
+
+  it("无密码房间对前端公开无需密码标记", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "清羽");
+
+    expect(room.hasPassword).toBe(false);
+    expect(service.getRoom(room.roomCode).hasPassword).toBe(false);
   });
 
   it("创建房主推流房间时初始化推流状态", () => {
