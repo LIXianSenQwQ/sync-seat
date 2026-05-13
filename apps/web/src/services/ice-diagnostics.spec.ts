@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canReplaceMdnsCandidate, parseIceCandidate } from "./ice-diagnostics";
+import { candidateMatchesHostStreamStage, canReplaceMdnsCandidate, describeHostStreamRoute, parseIceCandidate, updateDiagnosticsSelectedCandidate, createInitialHostStreamIceDiagnostics } from "./ice-diagnostics";
 
 describe("ice-diagnostics", () => {
   it("解析 IPv4 host 候选", () => {
@@ -79,5 +79,31 @@ describe("ice-diagnostics", () => {
     expect(canReplaceMdnsCandidate(candidate, "203.0.113.8")).toBe(false);
     expect(canReplaceMdnsCandidate(candidate, "2001:db8::1")).toBe(false);
     expect(canReplaceMdnsCandidate(candidate, "unknown")).toBe(false);
+  });
+
+  it("按房主推流阶段过滤 ICE 候选", () => {
+    const ipv6Host = parseIceCandidate("candidate:8 1 udp 2122260223 240e:1::8 53421 typ host");
+    const ipv4Srflx = parseIceCandidate("candidate:9 1 udp 1686052607 203.0.113.12 62000 typ srflx");
+    const relay = parseIceCandidate("candidate:10 1 udp 41885695 198.51.100.7 3478 typ relay");
+
+    expect(candidateMatchesHostStreamStage("ipv6", ipv6Host)).toBe(true);
+    expect(candidateMatchesHostStreamStage("ipv6", ipv4Srflx)).toBe(false);
+    expect(candidateMatchesHostStreamStage("ipv4", ipv4Srflx)).toBe(true);
+    expect(candidateMatchesHostStreamStage("ipv4", relay)).toBe(false);
+    expect(candidateMatchesHostStreamStage("relay", relay)).toBe(true);
+  });
+
+  it("描述 IPv6 直连和 TURN 中继路径", () => {
+    const ipv6Diagnostics = updateDiagnosticsSelectedCandidate(
+      createInitialHostStreamIceDiagnostics("ipv6"),
+      parseIceCandidate("candidate:11 1 udp 2122260223 240e:1::8 53421 typ host")
+    );
+    const relayDiagnostics = updateDiagnosticsSelectedCandidate(
+      createInitialHostStreamIceDiagnostics("relay"),
+      parseIceCandidate("candidate:12 1 udp 41885695 198.51.100.7 3478 typ relay")
+    );
+
+    expect(describeHostStreamRoute(ipv6Diagnostics)).toBe("IPv6 直连");
+    expect(describeHostStreamRoute(relayDiagnostics)).toBe("TURN 中继");
   });
 });

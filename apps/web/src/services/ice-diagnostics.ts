@@ -1,6 +1,7 @@
 export type IceCandidateType = "host" | "srflx" | "relay" | "prflx" | "unknown";
 export type IceIpFamily = "ipv4" | "ipv6" | "mdns" | "unknown";
-export type HostStreamConnectionRoute = "lan" | "ipv4-stun" | "turn" | "no-ipv4-stun" | "checking";
+export type HostStreamIceStage = "ipv6" | "ipv4" | "relay";
+export type HostStreamConnectionRoute = "ipv6-direct" | "lan" | "ipv4-stun" | "turn" | "no-ipv4-stun" | "checking";
 
 export interface ParsedIceCandidate {
   candidate: string;
@@ -15,7 +16,9 @@ export interface ParsedIceCandidate {
 }
 
 export interface HostStreamIceDiagnostics {
+  stage: HostStreamIceStage;
   state: RTCIceConnectionState;
+  hasIpv6HostCandidate: boolean;
   hasIpv4HostCandidate: boolean;
   hasIpv4SrflxCandidate: boolean;
   hasRelayCandidate: boolean;
@@ -26,9 +29,11 @@ export interface HostStreamIceDiagnostics {
   restarted: boolean;
 }
 
-export function createInitialHostStreamIceDiagnostics(): HostStreamIceDiagnostics {
+export function createInitialHostStreamIceDiagnostics(stage: HostStreamIceStage = "ipv6"): HostStreamIceDiagnostics {
   return {
+    stage,
     state: "new",
+    hasIpv6HostCandidate: false,
     hasIpv4HostCandidate: false,
     hasIpv4SrflxCandidate: false,
     hasRelayCandidate: false,
@@ -88,6 +93,20 @@ export function canReplaceMdnsCandidate(
   return Boolean(parsed?.isMdns && parsed.type === "host" && isPrivateIpv4Address(localIp));
 }
 
+/**
+ * 判断当前 ICE 阶段是否允许发送该候选。
+ *
+ * @param stage 房主推流当前回落阶段。
+ * @param parsed 已解析候选；解析失败时不发送，避免污染远端 ICE 池。
+ * @returns 是否应通过信令转发给对端。
+ */
+export function candidateMatchesHostStreamStage(stage: HostStreamIceStage, parsed: ParsedIceCandidate | null): boolean {
+  if (!parsed) return false;
+  if (stage === "ipv6") return parsed.type === "host" && parsed.family === "ipv6" && parsed.protocol === "udp";
+  if (stage === "ipv4") return parsed.type !== "relay" && (parsed.family === "ipv4" || parsed.family === "mdns");
+  return parsed.type === "relay";
+}
+
 export function replaceMdnsCandidateAddress(candidate: RTCIceCandidate, localIp: string): RTCIceCandidateInit {
   return {
     candidate: candidate.candidate.replace(/[a-z0-9-]+\.local/gi, localIp),
@@ -104,10 +123,18 @@ export function updateDiagnosticsWithCandidate(
   if (!parsed) return diagnostics;
   return resolveDiagnosticsRoute({
     ...diagnostics,
+    hasIpv6HostCandidate: diagnostics.hasIpv6HostCandidate || (parsed.type === "host" && parsed.family === "ipv6"),
     hasIpv4HostCandidate: diagnostics.hasIpv4HostCandidate || (parsed.type === "host" && parsed.family === "ipv4"),
     hasIpv4SrflxCandidate: diagnostics.hasIpv4SrflxCandidate || (parsed.type === "srflx" && parsed.family === "ipv4"),
     hasRelayCandidate: diagnostics.hasRelayCandidate || parsed.type === "relay",
     hasMdnsCandidate: diagnostics.hasMdnsCandidate || parsed.isMdns
+  });
+}
+
+export function updateDiagnosticsStage(diagnostics: HostStreamIceDiagnostics, stage: HostStreamIceStage): HostStreamIceDiagnostics {
+  return resolveDiagnosticsRoute({
+    ...createInitialHostStreamIceDiagnostics(stage),
+    restarted: diagnostics.restarted
   });
 }
 
@@ -136,6 +163,7 @@ export function updateDiagnosticsSelectedCandidate(
 }
 
 export function describeHostStreamRoute(diagnostics: HostStreamIceDiagnostics): string {
+  if (diagnostics.route === "ipv6-direct") return "IPv6 直连";
   if (diagnostics.route === "lan") return "局域网直连";
   if (diagnostics.route === "ipv4-stun") return "IPv4 STUN 打洞";
   if (diagnostics.route === "turn") return "TURN 中继";
@@ -163,11 +191,17 @@ function resolveDiagnosticsRoute(diagnostics: HostStreamIceDiagnostics): HostStr
   if (diagnostics.selectedCandidateType === "relay") {
     return { ...diagnostics, route: "turn" };
   }
+  if (diagnostics.selectedCandidateType === "host" && diagnostics.selectedCandidateFamily === "ipv6") {
+    return { ...diagnostics, route: "ipv6-direct" };
+  }
   if (diagnostics.selectedCandidateType === "srflx" && diagnostics.selectedCandidateFamily === "ipv4") {
     return { ...diagnostics, route: "ipv4-stun" };
   }
   if (diagnostics.selectedCandidateType === "host") {
     return { ...diagnostics, route: "lan" };
+  }
+  if (diagnostics.hasIpv6HostCandidate && (diagnostics.state === "connected" || diagnostics.state === "completed")) {
+    return { ...diagnostics, route: "ipv6-direct" };
   }
   if (diagnostics.hasIpv4HostCandidate && (diagnostics.state === "connected" || diagnostics.state === "completed")) {
     return { ...diagnostics, route: "lan" };
