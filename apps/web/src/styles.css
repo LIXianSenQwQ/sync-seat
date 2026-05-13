@@ -40,6 +40,22 @@ p {
   margin: 0;
 }
 
+.app-version {
+  position: fixed;
+  bottom: 12px;
+  left: 14px;
+  z-index: 20;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(13, 17, 21, 0.72);
+  color: rgba(231, 237, 243, 0.68);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 7px 10px;
+  pointer-events: none;
+}
+
 .entry-shell,
 .page-shell,
 .room-shell {
@@ -403,5 +419,10 @@ input:focus {
   .room-topbar {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .app-version {
+    bottom: 8px;
+    left: 10px;
   }
 }
