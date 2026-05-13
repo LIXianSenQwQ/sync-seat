@@ -10,11 +10,14 @@ export class VoiceMesh {
   private peers = new Map<string, RTCPeerConnection>();
   private remoteAudio = new Map<string, HTMLAudioElement>();
   private volume = 1;
+  /** 缓存在 setRemoteDescription 之前到达的 ICE candidate */
+  private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
   constructor(
     private readonly iceServers: IceServerConfig[],
     private readonly memberId: string,
-    private readonly sendSignal: (targetMemberId: string, type: "offer" | "answer" | "ice_candidate", payload: unknown) => void
+    private readonly sendSignal: (targetMemberId: string, type: "offer" | "answer" | "ice_candidate", payload: unknown) => void,
+    private readonly onConnectionState?: (memberId: string, state: RTCPeerConnectionState) => void
   ) {}
 
   async join(members: RoomMember[]): Promise<void> {
@@ -55,12 +58,30 @@ export class VoiceMesh {
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       this.sendSignal(fromMemberId, "answer", answer);
+      this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "answer") {
       await peer.setRemoteDescription(payload as RTCSessionDescriptionInit);
+      this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "ice_candidate" && payload) {
-      await peer.addIceCandidate(payload as RTCIceCandidateInit);
+      const candidate = payload as RTCIceCandidateInit;
+      if (peer.remoteDescription) {
+        await peer.addIceCandidate(candidate);
+      } else {
+        const queue = this.pendingCandidates.get(fromMemberId) ?? [];
+        queue.push(candidate);
+        this.pendingCandidates.set(fromMemberId, queue);
+      }
+    }
+  }
+
+  private async flushPendingCandidates(memberId: string, peer: RTCPeerConnection): Promise<void> {
+    const queue = this.pendingCandidates.get(memberId);
+    if (!queue) return;
+    this.pendingCandidates.delete(memberId);
+    for (const candidate of queue) {
+      await peer.addIceCandidate(candidate);
     }
   }
 
@@ -83,10 +104,17 @@ export class VoiceMesh {
       document.body.appendChild(audio);
       this.remoteAudio.set(targetMemberId, audio);
     };
+
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         this.sendSignal(targetMemberId, "ice_candidate", event.candidate);
       }
+    };
+
+    // 步骤3：监控 ICE 连接状态，便于排查跨网络连通性问题。
+    peer.oniceconnectionstatechange = () => {
+      console.log(`[VoiceMesh] ICE 连接状态 (${targetMemberId}): ${peer.iceConnectionState}`);
+      this.onConnectionState?.(targetMemberId, peer.iceConnectionState);
     };
 
     if (initiator) {

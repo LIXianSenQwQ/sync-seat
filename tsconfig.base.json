@@ -9,10 +9,6 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "baseUrl": ".",
-    "paths": {
-      "@sync-seat/shared": [
-        "packages/shared/src"
-      ]
-    }
+    "paths": {}
   }
 }

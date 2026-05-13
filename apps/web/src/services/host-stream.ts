@@ -16,19 +16,19 @@ export class HostStreamMesh {
   private localStream: MediaStream | null = null;
   private remoteStream: MediaStream | null = null;
   private peers = new Map<string, RTCPeerConnection>();
+  /** 缓存在 setRemoteDescription 之前到达的 ICE candidate */
+  private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
   constructor(
     private readonly iceServers: IceServerConfig[],
     private readonly memberId: string,
     private readonly sendSignal: (targetMemberId: string, type: HostSignalType, payload: unknown) => void,
-    private readonly onRemoteStream: (stream: MediaStream) => void
+    private readonly onRemoteStream: (stream: MediaStream) => void,
+    private readonly onConnectionState?: (memberId: string, state: RTCPeerConnectionState) => void
   ) {}
 
   /**
    * 从房主本地播放器采集媒体流。
-   *
-   * @param video 房主本地 video 元素。
-   * @returns 采集到的媒体流。
    */
   captureFromVideo(video: HTMLVideoElement): MediaStream {
     const source = video as CaptureVideo;
@@ -42,8 +42,6 @@ export class HostStreamMesh {
 
   /**
    * 房主为在线观众建立推流连接。
-   *
-   * @param members 房间成员列表。
    */
   async publishToMembers(members: RoomMember[]): Promise<void> {
     if (!this.localStream) return;
@@ -56,10 +54,6 @@ export class HostStreamMesh {
 
   /**
    * 处理远端 WebRTC 信令。
-   *
-   * @param fromMemberId 信令来源成员。
-   * @param signalType 信令类型。
-   * @param payload 信令内容。
    */
   async handleSignal(fromMemberId: string, signalType: HostSignalType, payload: unknown): Promise<void> {
     const peer = await this.ensurePeer(fromMemberId, false);
@@ -68,12 +62,30 @@ export class HostStreamMesh {
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       this.sendSignal(fromMemberId, "answer", answer);
+      this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "answer") {
       await peer.setRemoteDescription(payload as RTCSessionDescriptionInit);
+      this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "ice_candidate" && payload) {
-      await peer.addIceCandidate(payload as RTCIceCandidateInit);
+      const candidate = payload as RTCIceCandidateInit;
+      if (peer.remoteDescription) {
+        await peer.addIceCandidate(candidate);
+      } else {
+        const queue = this.pendingCandidates.get(fromMemberId) ?? [];
+        queue.push(candidate);
+        this.pendingCandidates.set(fromMemberId, queue);
+      }
+    }
+  }
+
+  private async flushPendingCandidates(memberId: string, peer: RTCPeerConnection): Promise<void> {
+    const queue = this.pendingCandidates.get(memberId);
+    if (!queue) return;
+    this.pendingCandidates.delete(memberId);
+    for (const candidate of queue) {
+      await peer.addIceCandidate(candidate);
     }
   }
 
@@ -102,10 +114,17 @@ export class HostStreamMesh {
         this.onRemoteStream(stream);
       }
     };
+
     peer.onicecandidate = (event) => {
       if (event.candidate) {
         this.sendSignal(targetMemberId, "ice_candidate", event.candidate);
       }
+    };
+
+    // 步骤3：监控 ICE 连接状态，便于排查跨网络连通性问题。
+    peer.oniceconnectionstatechange = () => {
+      console.log(`[HostStream] ICE 连接状态 (${targetMemberId}): ${peer.iceConnectionState}`);
+      this.onConnectionState?.(targetMemberId, peer.iceConnectionState);
     };
 
     if (initiator) {

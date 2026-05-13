@@ -33,6 +33,8 @@ const hostStream = shallowRef<HostStreamMesh | null>(null);
 const localVideoUrl = ref("");
 const localVideoName = ref("");
 const remoteStreamReady = ref(false);
+const hostStreamIceState = ref<Record<string, RTCPeerConnectionState>>({});
+const voiceIceState = ref<Record<string, RTCPeerConnectionState>>({});
 let calibrationTimer: number | null = null;
 
 const members = computed(() => room.value?.members ?? []);
@@ -186,6 +188,13 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
         remoteStreamVideoRef.value.srcObject = stream;
         await remoteStreamVideoRef.value.play().catch(() => undefined);
       }
+    },
+    (memberId, state) => {
+      hostStreamIceState.value = { ...hostStreamIceState.value, [memberId]: state };
+      // 连接失败时给出明确提示
+      if (state === "failed" || state === "disconnected") {
+        console.warn(`[HostStream] 与 ${memberId} 的 ICE 连接失败 (state: ${state})，请检查网络或配置 TURN 中继`);
+      }
     }
   );
   return hostStream.value;
@@ -255,6 +264,8 @@ async function joinVoice(): Promise<void> {
       targetMemberId,
       ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
     } as ClientRoomEvent);
+  }, (memberId, state) => {
+    voiceIceState.value = { ...voiceIceState.value, [memberId]: state };
   });
   await voice.value.join(members.value);
   voice.value.setVolume(volume.value);
@@ -421,7 +432,19 @@ onBeforeUnmount(() => {
             <button class="danger full" :disabled="!room.hostStreamState?.streaming" @click="stopHostStream">停止推流</button>
           </template>
           <template v-else>
-            <p class="side-note">{{ room.hostStreamState?.streaming ? (remoteStreamReady ? '正在接收房主推流' : '等待房主媒体连接') : '房主尚未开始推流' }}</p>
+            <template v-if="room.hostStreamState?.streaming">
+              <p v-if="remoteStreamReady" class="side-note">正在接收房主推流</p>
+              <p v-else class="side-note">
+                等待房主媒体连接…
+                <span v-if="Object.values(hostStreamIceState).length" class="ice-state">
+                  ICE: {{ Object.values(hostStreamIceState).join(', ') }}
+                </span>
+              </p>
+              <p v-if="Object.values(hostStreamIceState).some(s => s === 'failed' || s === 'disconnected')" class="error">
+                P2P 连接失败，请确认两台设备在同一局域网，或配置 TURN 中继服务器
+              </p>
+            </template>
+            <p v-else class="side-note">房主尚未开始推流</p>
             <button class="ghost full" @click="requestHostControl({ action: 'play' })">请求播放</button>
             <button class="ghost full" @click="requestHostControl({ action: 'pause' })">请求暂停</button>
             <button class="ghost full" @click="requestHostControl({ action: 'seek', positionSeconds: Math.max(0, (remoteStreamVideoRef?.currentTime || 0) + 30) })">请求快进 30 秒</button>

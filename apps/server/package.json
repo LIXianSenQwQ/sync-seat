@@ -5,6 +5,7 @@
   "type": "module",
   "author": "清羽",
   "scripts": {
+    "predev": "npm run build --workspace @sync-seat/shared",
     "dev": "nest start --watch",
     "build": "nest build",
     "start": "node dist/main.js",
