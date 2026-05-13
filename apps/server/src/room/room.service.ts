@@ -1,5 +1,5 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from "@nestjs/common";
+import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
 import type { CurrentSubtitle, HostStreamState, PlaybackState, RoomState, WatchMode } from "@sync-seat/shared";
 import { AlistService } from "../drive/alist.service.js";
 import { SubtitleService } from "../drive/subtitle.service.js";
@@ -8,6 +8,8 @@ import { clonePublicRoom, type JoinResult, type StoredRoom } from "./room.types.
 const MAX_MEMBERS = 3;
 const OWNER_GRACE_MS = 60_000;
 const EMPTY_ROOM_TTL_MS = 60_000;
+const ROOM_CODE_DIGITS = 4;
+const ROOM_CODE_LIMIT = 10 ** ROOM_CODE_DIGITS;
 
 /**
  * 房间内存状态管理服务。
@@ -321,11 +323,23 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
   }
 
   private createRoomCode(): string {
-    let code = "";
-    do {
-      code = randomBytes(4).toString("base64url").replace(/[^A-Z0-9]/gi, "").slice(0, 6).toUpperCase();
-    } while (code.length < 6 || this.rooms.has(code));
-    return code;
+    // 步骤1：优先随机生成 4 位数字房间号，降低连续创建时的可预测性。
+    for (let attempt = 0; attempt < ROOM_CODE_LIMIT; attempt++) {
+      const code = randomInt(0, ROOM_CODE_LIMIT).toString().padStart(ROOM_CODE_DIGITS, "0");
+      if (!this.rooms.has(code)) {
+        return code;
+      }
+    }
+
+    // 步骤2：极端碰撞或接近满号段时，顺序扫描确保只要存在空号就能创建成功。
+    for (let value = 0; value < ROOM_CODE_LIMIT; value++) {
+      const code = value.toString().padStart(ROOM_CODE_DIGITS, "0");
+      if (!this.rooms.has(code)) {
+        return code;
+      }
+    }
+
+    throw new ServiceUnavailableException("房间号已用尽，请稍后再试");
   }
 
   private initialPlaybackState(now: string): PlaybackState {

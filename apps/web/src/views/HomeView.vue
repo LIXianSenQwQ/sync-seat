@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useRouter } from "vue-router";
 import { api } from "../services/api";
 import { getIdentity, saveNickname } from "../services/identity";
@@ -12,6 +12,7 @@ const password = ref("");
 const watchMode = ref<"direct" | "host-stream">("direct");
 const creating = ref(false);
 const error = ref("");
+const roomCodeReady = computed(() => /^\d{4}$/.test(roomCode.value));
 
 async function createRoom(): Promise<void> {
   error.value = "";
@@ -33,8 +34,16 @@ async function createRoom(): Promise<void> {
 }
 
 async function joinRoom(): Promise<void> {
+  normalizeRoomCodeInput();
+  if (!roomCodeReady.value) {
+    return;
+  }
   identity.value = saveNickname(nickname.value);
-  await router.push(`/room/${roomCode.value.trim().toUpperCase()}`);
+  await router.push(`/room/${roomCode.value}`);
+}
+
+function normalizeRoomCodeInput(): void {
+  roomCode.value = roomCode.value.replace(/\D/g, "").slice(0, 4);
 }
 </script>
 
@@ -68,10 +77,17 @@ async function joinRoom(): Promise<void> {
         <div class="action-card">
           <h2>加入房间</h2>
           <label class="field">
-            <span>房间码</span>
-            <input v-model="roomCode" maxlength="6" placeholder="ABC123" />
+            <span>房间号</span>
+            <input
+              v-model="roomCode"
+              inputmode="numeric"
+              maxlength="4"
+              pattern="[0-9]*"
+              placeholder="1234"
+              @input="normalizeRoomCodeInput"
+            />
           </label>
-          <button class="primary" :disabled="!roomCode.trim()" @click="joinRoom">进入房间</button>
+          <button class="primary" :disabled="!roomCodeReady" @click="joinRoom">进入房间</button>
         </div>
       </div>
 

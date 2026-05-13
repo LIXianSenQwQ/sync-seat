@@ -17,11 +17,17 @@ export class VoiceMesh {
     private readonly iceServers: IceServerConfig[],
     private readonly memberId: string,
     private readonly sendSignal: (targetMemberId: string, type: "offer" | "answer" | "ice_candidate", payload: unknown) => void,
-    private readonly onConnectionState?: (memberId: string, state: RTCPeerConnectionState) => void
+    private readonly onConnectionState?: (memberId: string, state: RTCIceConnectionState) => void
   ) {}
 
-  async join(members: RoomMember[]): Promise<void> {
-    this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  /**
+   * 加入房间语音。
+   *
+   * @param members 当前房间成员列表。
+   * @param localStream 已经由页面用户手势获取到的本地麦克风流。
+   */
+  async join(members: RoomMember[], localStream?: MediaStream): Promise<void> {
+    this.localStream = localStream ?? await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     for (const member of members) {
       if (member.memberId !== this.memberId && member.voiceJoined) {
         await this.ensurePeer(member.memberId, true);
@@ -58,11 +64,11 @@ export class VoiceMesh {
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
       this.sendSignal(fromMemberId, "answer", answer);
-      this.flushPendingCandidates(fromMemberId, peer);
+      await this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "answer") {
       await peer.setRemoteDescription(payload as RTCSessionDescriptionInit);
-      this.flushPendingCandidates(fromMemberId, peer);
+      await this.flushPendingCandidates(fromMemberId, peer);
     }
     if (signalType === "ice_candidate" && payload) {
       const candidate = payload as RTCIceCandidateInit;

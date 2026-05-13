@@ -31,6 +31,7 @@ describe("RoomService", () => {
     const room = service.createRoom("m1", "清羽", "secret");
 
     expect(room.watchMode).toBe("direct");
+    expect(room.roomCode).toMatch(/^\d{4}$/);
     expect(room.hostStreamState).toBeNull();
     expect(() => service.joinRoom(room.roomCode, "m2", "朋友", "wrong")).toThrow(ForbiddenException);
     const joined = service.joinRoom(room.roomCode, "m2", "朋友", "secret").room;
