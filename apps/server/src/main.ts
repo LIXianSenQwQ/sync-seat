@@ -1,6 +1,6 @@
 import "reflect-metadata";
 import { existsSync } from "node:fs";
-import { extname, join } from "node:path";
+import { extname, join, resolve } from "node:path";
 import { NestFactory } from "@nestjs/core";
 import type { NestExpressApplication } from "@nestjs/platform-express";
 import type { NextFunction, Request, Response } from "express";
@@ -42,7 +42,7 @@ async function bootstrap(): Promise<void> {
  * @param app Nest Express 应用实例。
  */
 function configureStaticAssets(app: NestExpressApplication): void {
-  const webDistPath = process.env.WEB_DIST_PATH ?? defaultWebDistPath;
+  const webDistPath = resolve(process.env.WEB_DIST_PATH ?? defaultWebDistPath);
   const indexFilePath = join(webDistPath, "index.html");
 
   if (!existsSync(indexFilePath)) {
