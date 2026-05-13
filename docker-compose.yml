@@ -21,12 +21,23 @@ services:
     restart: unless-stopped
     depends_on:
       - app
+      - acme
     ports:
       - "80:80"
       - "443:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./letsencrypt:/etc/nginx/certs:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        until [ -f /etc/nginx/certs/fullchain.cer ] && [ -f /etc/nginx/certs/private.key ]; do
+          echo "[Init] 等待 acme.sh 写入 HTTPS 证书..."
+          sleep 5
+        done
+        exec nginx -g "daemon off;"
 
   acme:
     image: neilpang/acme.sh:latest
@@ -62,7 +73,7 @@ services:
             /usr/local/bin/acme.sh --install-cert -d "${domain}" \
               --key-file       /acme.sh/private.key \
               --fullchain-file /acme.sh/fullchain.cer \
-              --reloadcmd      "docker exec sync-seat-nginx nginx -s reload"
+              --reloadcmd      "docker exec sync-seat-nginx nginx -s reload || true"
           else
             echo "[Init] ${domain} 证书已存在，跳过首次签发。"
           fi
