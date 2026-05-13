@@ -42,9 +42,15 @@ export class AlistService {
    * @throws ForbiddenException 路径不在白名单内。
    */
   async listDirectory(path: string): Promise<DriveEntry[]> {
-    const safePath = this.assertAllowedPath(path);
+    const safePath = normalizePath(path);
+    const virtualEntries = this.listVirtualAllowedRoots(safePath);
+    if (virtualEntries) {
+      return virtualEntries;
+    }
+    this.assertAllowedPath(safePath);
     const data = await this.request<{ content: AlistItem[] }>("/api/fs/list", {
       path: safePath,
+      password: "",
       page: 1,
       per_page: 0,
       refresh: false
@@ -83,7 +89,7 @@ export class AlistService {
       throw new ForbiddenException("该文件不是 v1 支持的视频格式");
     }
 
-    const data = await this.request<AlistItem>("/api/fs/get", { path: safePath });
+    const data = await this.request<AlistItem>("/api/fs/get", { path: safePath, password: "" });
     const fileName = safePath.split("/").pop() ?? safePath;
     return {
       filePath: safePath,
@@ -101,7 +107,7 @@ export class AlistService {
    */
   async resolveFileUrl(path: string): Promise<string> {
     const safePath = this.assertAllowedPath(path);
-    const file = await this.request<AlistItem>("/api/fs/get", { path: safePath });
+    const file = await this.request<AlistItem>("/api/fs/get", { path: safePath, password: "" });
     return file.raw_url ?? `${this.env.alistBaseUrl}/d${encodeURI(safePath)}`;
   }
 
@@ -149,6 +155,44 @@ export class AlistService {
       throw new ForbiddenException("路径不在允许访问的网盘目录内");
     }
     return safePath;
+  }
+
+  private listVirtualAllowedRoots(path: string): DriveEntry[] | null {
+    const roots = this.env.allowedRootPaths;
+    if (roots.includes("/") || this.isAllowedPath(path)) {
+      return null;
+    }
+
+    const children = new Map<string, DriveEntry>();
+    for (const root of roots) {
+      if (!this.isRootParent(path, root)) {
+        continue;
+      }
+      const relative = root.slice(path === "/" ? 1 : path.length + 1);
+      const nextSegment = relative.split("/").filter(Boolean)[0];
+      if (!nextSegment) {
+        continue;
+      }
+      const childPath = normalizePath(`${path}/${nextSegment}`);
+      children.set(childPath, {
+        name: nextSegment,
+        path: childPath,
+        type: "directory"
+      });
+    }
+
+    return children.size > 0 ? [...children.values()] : null;
+  }
+
+  private isAllowedPath(path: string): boolean {
+    return this.env.allowedRootPaths.some((root) => path === root || path.startsWith(`${root}/`));
+  }
+
+  private isRootParent(path: string, root: string): boolean {
+    if (path === "/") {
+      return root !== "/";
+    }
+    return root.startsWith(`${path}/`);
   }
 
   private async request<T>(apiPath: string, body: unknown): Promise<T> {

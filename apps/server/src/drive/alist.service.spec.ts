@@ -19,6 +19,37 @@ describe("AlistService", () => {
     expect(() => service.assertAllowedPath("/Private/demo.mp4")).toThrow(ForbiddenException);
   });
 
+  it("根目录返回白名单虚拟目录，避免直接访问 OpenList 根目录被白名单拦截", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const service = new AlistService(new TestEnv());
+
+    await expect(service.listDirectory("/")).resolves.toEqual([
+      {
+        name: "Movies",
+        path: "/Movies",
+        type: "directory"
+      }
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("白名单根目录的父目录返回下一层虚拟目录", async () => {
+    class NestedRootEnv extends TestEnv {
+      override readonly allowedRootPaths = ["/Media/Movies"];
+    }
+    const service = new AlistService(new NestedRootEnv());
+
+    await expect(service.listDirectory("/Media")).resolves.toEqual([
+      {
+        name: "Movies",
+        path: "/Media/Movies",
+        type: "directory"
+      }
+    ]);
+  });
+
   it("识别 v1 支持的视频后缀", () => {
     expect(isVideoFile("demo.mp4")).toBe(true);
     expect(isVideoFile("demo.webm")).toBe(true);
@@ -50,6 +81,7 @@ describe("AlistService", () => {
       body: JSON.stringify({ username: "admin", password: "password" })
     }));
     expect(fetchMock).toHaveBeenNthCalledWith(2, "https://alist.test/api/fs/list", expect.objectContaining({
+      body: JSON.stringify({ path: "/Movies", password: "", page: 1, per_page: 0, refresh: false }),
       headers: expect.objectContaining({ Authorization: "token-1" })
     }));
     vi.unstubAllGlobals();
