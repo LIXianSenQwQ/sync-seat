@@ -1,5 +1,13 @@
 import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 
+const MAX_REMOTE_VOICE_GAIN = 2;
+
+type RemoteVoiceAudio = {
+  context: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  gain: GainNode;
+};
+
 /**
  * WebRTC TURN 中继语音管理器。
  *
@@ -8,7 +16,7 @@ import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 export class VoiceMesh {
   private localStream: MediaStream | null = null;
   private peers = new Map<string, RTCPeerConnection>();
-  private remoteAudio = new Map<string, HTMLAudioElement>();
+  private remoteAudio = new Map<string, RemoteVoiceAudio>();
   private volume = 1;
   private readonly turnIceServers: IceServerConfig[];
   /** 缓存在 setRemoteDescription 之前到达的 ICE candidate */
@@ -46,8 +54,8 @@ export class VoiceMesh {
     this.localStream = null;
     this.peers.forEach((peer) => peer.close());
     this.peers.clear();
-    this.remoteAudio.forEach((audio) => audio.remove());
-    this.remoteAudio.clear();
+    this.pendingCandidates.clear();
+    this.cleanupRemoteAudio();
   }
 
   setMuted(muted: boolean): void {
@@ -57,9 +65,9 @@ export class VoiceMesh {
   }
 
   setVolume(volume: number): void {
-    this.volume = volume;
+    this.volume = Math.min(1, Math.max(0, volume));
     this.remoteAudio.forEach((audio) => {
-      audio.volume = volume;
+      audio.gain.gain.value = this.resolveRemoteVoiceGain();
     });
   }
 
@@ -107,14 +115,10 @@ export class VoiceMesh {
     // 步骤1：本地音频轨道加入每条 TURN 中继语音连接。
     this.localStream?.getTracks().forEach((track) => peer.addTrack(track, this.localStream!));
 
-    // 步骤2：远端音轨以隐藏 audio 元素播放，并受本地总音量控制。
+    // 步骤2：远端音轨通过 Web Audio 增益节点播放，允许语音音量超过浏览器原生 100%。
     peer.ontrack = (event) => {
-      const audio = document.createElement("audio");
-      audio.autoplay = true;
-      audio.volume = this.volume;
-      audio.srcObject = event.streams[0];
-      document.body.appendChild(audio);
-      this.remoteAudio.set(targetMemberId, audio);
+      const [remoteStream] = event.streams;
+      if (remoteStream) this.attachRemoteAudio(targetMemberId, remoteStream);
     };
 
     peer.onicecandidate = (event) => {
@@ -135,6 +139,56 @@ export class VoiceMesh {
       this.sendSignal(targetMemberId, "offer", offer);
     }
     return peer;
+  }
+
+  /**
+   * 绑定远端语音流到 Web Audio 播放链路。
+   *
+   * @param targetMemberId 远端成员 ID。
+   * @param stream 远端 WebRTC 音频流。
+   */
+  private attachRemoteAudio(targetMemberId: string, stream: MediaStream): void {
+    this.cleanupRemoteAudio(targetMemberId);
+    const AudioContextConstructor = resolveAudioContextConstructor();
+    const context = new AudioContextConstructor();
+    const source = context.createMediaStreamSource(stream);
+    const gain = context.createGain();
+
+    // 步骤1：将 UI 的 0..1 音量映射为 0..2 增益，保留原滑块交互但提供最高 200% 响度。
+    gain.gain.value = this.resolveRemoteVoiceGain();
+
+    // 步骤2：远端流只接入 Web Audio 目的地，避免和隐藏 audio 元素产生双重播放。
+    source.connect(gain);
+    gain.connect(context.destination);
+    void context.resume().catch(() => undefined);
+    this.remoteAudio.set(targetMemberId, { context, source, gain });
+  }
+
+  /**
+   * 清理远端语音播放资源。
+   *
+   * @param targetMemberId 指定成员 ID；为空时清理全部远端播放链路。
+   */
+  private cleanupRemoteAudio(targetMemberId?: string): void {
+    const entries = targetMemberId
+      ? Array.from(this.remoteAudio.entries()).filter(([memberId]) => memberId === targetMemberId)
+      : Array.from(this.remoteAudio.entries());
+
+    for (const [memberId, audio] of entries) {
+      audio.source.disconnect();
+      audio.gain.disconnect();
+      void audio.context.close().catch(() => undefined);
+      this.remoteAudio.delete(memberId);
+    }
+  }
+
+  /**
+   * 计算远端语音增益值。
+   *
+   * @returns 映射后的 Web Audio 增益，最大为 2。
+   */
+  private resolveRemoteVoiceGain(): number {
+    return this.volume * MAX_REMOTE_VOICE_GAIN;
   }
 }
 
@@ -168,4 +222,13 @@ function isTurnUrl(url: string): boolean {
 
 function hasTurnCredentials(server: IceServerConfig): boolean {
   return Boolean(server.username?.trim() && server.credential?.trim());
+}
+
+/**
+ * 获取浏览器可用的 AudioContext 构造器。
+ *
+ * @returns 标准或兼容前缀的 AudioContext 构造器。
+ */
+function resolveAudioContextConstructor(): typeof AudioContext {
+  return window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
 }

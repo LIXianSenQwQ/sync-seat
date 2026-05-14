@@ -4,6 +4,7 @@ import { resolveVoiceTurnIceServers, VoiceMesh } from "./voice";
 
 class FakeRTCPeerConnection {
   static configs: RTCConfiguration[] = [];
+  static instances: FakeRTCPeerConnection[] = [];
   iceConnectionState: RTCIceConnectionState = "new";
   remoteDescription: RTCSessionDescription | null = null;
   ontrack: ((event: RTCTrackEvent) => void) | null = null;
@@ -12,6 +13,7 @@ class FakeRTCPeerConnection {
 
   constructor(config?: RTCConfiguration) {
     FakeRTCPeerConnection.configs.push(config ?? {});
+    FakeRTCPeerConnection.instances.push(this);
   }
 
   addTrack(): RTCRtpSender {
@@ -31,6 +33,31 @@ class FakeRTCPeerConnection {
   }
 }
 
+class FakeAudioContext {
+  static contexts: FakeAudioContext[] = [];
+  destination = {};
+  sources: Array<{ stream: MediaStream; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
+  gains: Array<{ gain: { value: number }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
+  resume = vi.fn(async () => undefined);
+  close = vi.fn(async () => undefined);
+
+  constructor() {
+    FakeAudioContext.contexts.push(this);
+  }
+
+  createMediaStreamSource(stream: MediaStream): MediaStreamAudioSourceNode {
+    const source = { stream, connect: vi.fn(), disconnect: vi.fn() };
+    this.sources.push(source);
+    return source as unknown as MediaStreamAudioSourceNode;
+  }
+
+  createGain(): GainNode {
+    const gain = { gain: { value: 0 }, connect: vi.fn(), disconnect: vi.fn() };
+    this.gains.push(gain);
+    return gain as unknown as GainNode;
+  }
+}
+
 const remoteMember: RoomMember = {
   memberId: "remote-member",
   nickname: "远端成员",
@@ -44,6 +71,8 @@ describe("VoiceMesh", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     FakeRTCPeerConnection.configs = [];
+    FakeRTCPeerConnection.instances = [];
+    FakeAudioContext.contexts = [];
   });
 
   it("语音只保留 TURN/TURNS ICE 配置", () => {
@@ -97,4 +126,65 @@ describe("VoiceMesh", () => {
       iceServers: [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }]
     });
   });
+
+  it("拉满语音总音量时远端语音使用 200% 增益", async () => {
+    const mesh = await createJoinedVoiceMesh();
+
+    emitRemoteTrack();
+    mesh.setVolume(1);
+
+    expect(FakeAudioContext.contexts[0].gains[0].gain.value).toBe(2);
+  });
+
+  it("半格语音总音量时远端语音使用原生 100% 增益", async () => {
+    const mesh = await createJoinedVoiceMesh();
+
+    emitRemoteTrack();
+    mesh.setVolume(0.5);
+
+    expect(FakeAudioContext.contexts[0].gains[0].gain.value).toBe(1);
+  });
+
+  it("远端音轨到达时按当前语音总音量初始化增益", async () => {
+    const mesh = await createJoinedVoiceMesh();
+    mesh.setVolume(0.5);
+
+    emitRemoteTrack();
+
+    expect(FakeAudioContext.contexts[0].gains[0].gain.value).toBe(1);
+  });
+
+  it("离开语音时清理远端语音播放链路", async () => {
+    const mesh = await createJoinedVoiceMesh();
+    emitRemoteTrack();
+    const context = FakeAudioContext.contexts[0];
+
+    mesh.leave();
+
+    expect(context.sources[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(context.gains[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(context.close).toHaveBeenCalledTimes(1);
+  });
 });
+
+async function createJoinedVoiceMesh(): Promise<VoiceMesh> {
+  vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+  vi.stubGlobal("AudioContext", FakeAudioContext);
+  const localStream = {
+    getTracks: () => [{ kind: "audio", stop: vi.fn() }],
+    getAudioTracks: () => [{ enabled: true }]
+  } as unknown as MediaStream;
+  const mesh = new VoiceMesh(
+    [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }],
+    "local-member",
+    vi.fn()
+  );
+
+  await mesh.join([remoteMember], localStream);
+  return mesh;
+}
+
+function emitRemoteTrack(): void {
+  const remoteStream = {} as MediaStream;
+  FakeRTCPeerConnection.instances[0].ontrack?.({ streams: [remoteStream] } as unknown as RTCTrackEvent);
+}
