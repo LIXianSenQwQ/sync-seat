@@ -2,7 +2,7 @@
 import { Maximize, Minimize, Pause, Play, RotateCcw, Volume1, Volume2, VolumeX } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { PLAYBACK_RATE_OPTIONS, type PlaybackAction, type PlaybackState } from "@sync-seat/shared";
-import { applyPlaybackState, targetPosition } from "../services/playback-sync";
+import { applyPlaybackState, targetPosition, type PlaybackSyncClock } from "../services/playback-sync";
 
 interface SubtitleTrack {
   src: string;
@@ -23,6 +23,7 @@ const props = withDefaults(
     src: string;
     mediaStream?: MediaStream | null;
     playbackState?: PlaybackState | null;
+    playbackSyncClock?: PlaybackSyncClock | null;
     subtitleTrack?: SubtitleTrack | null;
     syncMode?: boolean;
     playbackRateOptions?: readonly number[];
@@ -36,6 +37,7 @@ const props = withDefaults(
   {
     mediaStream: null,
     playbackState: null,
+    playbackSyncClock: null,
     subtitleTrack: null,
     syncMode: false,
     playbackRateOptions: () => PLAYBACK_RATE_OPTIONS,
@@ -152,7 +154,7 @@ function authoritativeIntentPosition(action: PlaybackAction, fallbackPosition: n
     return fallbackPosition;
   }
   // 步骤1：播放/暂停/倍速变化不表达新的进度位置，优先沿用房间权威状态，避免本地残留偏移回写。
-  return targetPosition(props.playbackState);
+  return targetPosition(props.playbackState, props.playbackSyncClock);
 }
 
 async function userTogglePlayback(): Promise<void> {
@@ -351,15 +353,18 @@ async function applyRemoteState(state: PlaybackState): Promise<void> {
     deferredRemoteState = state;
     return;
   }
+  if (state.playing && !props.playbackSyncClock) {
+    return;
+  }
   lastAppliedVersion = state.version;
   remotePlayBlocked.value = false;
-  const target = targetPosition(state);
+  const target = targetPosition(state, props.playbackSyncClock);
   if (!state.playing || Math.abs(target - video.currentTime) > 3) {
     pendingSeekTarget.value = target;
     waiting.value = true;
   }
   try {
-    await applyPlaybackState(video, state);
+    await applyPlaybackState(video, state, props.playbackSyncClock);
     playing.value = state.playing;
   } catch (err) {
     if (state.playing && err instanceof DOMException && err.name === "NotAllowedError") {

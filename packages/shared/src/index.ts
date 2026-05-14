@@ -195,7 +195,7 @@ export type ClientRoomEvent =
   | ({ type: "host_control_request"; roomCode: string; memberId: string } & HostControlCommand);
 
 export type ServerRoomEvent =
-  | { type: "room_state"; room: RoomState }
+  | { type: "room_state"; room: RoomState; serverTimeMs: number }
   | { type: "room_error"; message: string }
   | { type: "voice_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
   | { type: "host_stream_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }

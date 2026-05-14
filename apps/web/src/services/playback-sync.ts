@@ -1,15 +1,31 @@
 import type { PlaybackState } from "@sync-seat/shared";
 
 /**
+ * 客户端收到服务端状态时建立的单调时钟上下文。
+ *
+ * @author 清羽
+ */
+export interface PlaybackSyncClock {
+  serverTimeMs: number;
+  receivedAtMs: number;
+}
+
+/**
  * 依据服务端权威状态计算当前目标播放时间。
  *
  * @author 清羽
  */
-export function targetPosition(state: PlaybackState, nowMs = Date.now()): number {
+export function targetPosition(state: PlaybackState, clock?: PlaybackSyncClock | number | null, nowMs = performance.now()): number {
   if (!state.playing) {
     return state.positionSeconds;
   }
-  const elapsed = Math.max(0, nowMs - Date.parse(state.stateUpdatedAt)) / 1000;
+  const stateUpdatedAtMs = Date.parse(state.stateUpdatedAt);
+  const elapsedMs = typeof clock === "number"
+    ? Math.max(0, clock - stateUpdatedAtMs)
+    : clock
+    ? Math.max(0, clock.serverTimeMs - stateUpdatedAtMs + nowMs - clock.receivedAtMs)
+    : Math.max(0, Date.now() - stateUpdatedAtMs);
+  const elapsed = elapsedMs / 1000;
   return state.positionSeconds + elapsed * state.playbackRate;
 }
 
@@ -18,10 +34,11 @@ export function targetPosition(state: PlaybackState, nowMs = Date.now()): number
  *
  * @param video HTML5 video 元素。
  * @param state 服务端权威播放状态。
+ * @param clock 收到房间状态时的服务端时间和本地单调时间。
  * @returns 播放动作的 Promise，用于让调用方处理浏览器自动播放拦截。
  */
-export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState): Promise<void> {
-  const target = targetPosition(state);
+export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState, clock?: PlaybackSyncClock | null): Promise<void> {
+  const target = targetPosition(state, clock);
   const drift = target - video.currentTime;
   const absDrift = Math.abs(drift);
   let nextPlaybackRate = state.playbackRate;

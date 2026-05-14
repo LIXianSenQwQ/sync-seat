@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import type { RoomState } from "@sync-seat/shared";
+import type { RoomState, ServerRoomEvent } from "@sync-seat/shared";
 
 /**
  * WebSocket 房间连接索引。
@@ -38,8 +38,8 @@ export class RealtimeService {
     return `room:${roomCode.toUpperCase()}`;
   }
 
-  stateEvent(room: RoomState): { type: "room_state"; room: RoomState } {
-    return { type: "room_state", room };
+  stateEvent(room: RoomState): Extract<ServerRoomEvent, { type: "room_state" }> {
+    return { type: "room_state", room, serverTimeMs: Date.now() };
   }
 
   targetSocketIds(roomCode: string, memberId: string): string[] {

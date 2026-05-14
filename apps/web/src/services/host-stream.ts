@@ -63,8 +63,8 @@ const QUALITY_PROFILES: Record<HostStreamQuality, QualityProfile> = {
   }
 };
 
-/** 房主推流按网络成本从低到高尝试的 ICE 阶段。 */
-const ICE_STAGE_ORDER: HostStreamIceStage[] = ["ipv6", "ipv4", "relay"];
+/** 房主推流暂时只尝试 IPv6 直连，不通后直接走 TURN 中继。 */
+export const HOST_STREAM_ICE_STAGE_ORDER: HostStreamIceStage[] = ["ipv6", "relay"];
 /** 每个阶段等待浏览器 ICE 检查稳定成功的时间，超时后进入下一阶段。 */
 const ICE_STAGE_TIMEOUT_MS = 8_000;
 
@@ -265,7 +265,7 @@ export class HostStreamMesh {
   }
 
   private shouldIgnoreStaleStage(currentStage: HostStreamIceStage, incomingStage: HostStreamIceStage): boolean {
-    return ICE_STAGE_ORDER.indexOf(incomingStage) < ICE_STAGE_ORDER.indexOf(currentStage);
+    return HOST_STREAM_ICE_STAGE_ORDER.indexOf(incomingStage) < HOST_STREAM_ICE_STAGE_ORDER.indexOf(currentStage);
   }
 
   private async createPeer(targetMemberId: string, initiator: boolean, stage: HostStreamIceStage): Promise<RTCPeerConnection> {
@@ -360,14 +360,14 @@ export class HostStreamMesh {
   private resolveDescriptionPayload(payload: unknown): HostStreamDescriptionPayload {
     const envelope = payload as Partial<HostStreamDescriptionPayload> | null;
     const description = envelope?.description ?? (payload as RTCSessionDescriptionInit);
-    const stage = envelope?.stage === "ipv4" || envelope?.stage === "relay" ? envelope.stage : "ipv6";
+    const stage = envelope?.stage === "relay" ? envelope.stage : "ipv6";
     return { description, stage };
   }
 
   private resolveCandidatePayload(payload: unknown): HostStreamCandidatePayload {
     const envelope = payload as Partial<HostStreamCandidatePayload> | null;
     const candidate = envelope?.candidate ?? (payload as RTCIceCandidateInit);
-    const stage = envelope?.stage === "ipv4" || envelope?.stage === "relay" ? envelope.stage : "ipv6";
+    const stage = envelope?.stage === "relay" ? envelope.stage : "ipv6";
     return { candidate, stage };
   }
 
@@ -397,13 +397,7 @@ export class HostStreamMesh {
   }
 
   private resolveIceServers(stage: HostStreamIceStage): IceServerConfig[] {
-    if (stage === "ipv6") return [];
-    if (stage === "ipv4") return this.iceServers.filter((server) => this.resolveServerUrls(server).some((url) => url.startsWith("stun:")));
-    return this.iceServers.filter((server) => this.resolveServerUrls(server).some((url) => url.startsWith("turn:") || url.startsWith("turns:")));
-  }
-
-  private resolveServerUrls(server: IceServerConfig): string[] {
-    return Array.isArray(server.urls) ? server.urls : [server.urls];
+    return resolveHostStreamIceServersForStage(stage, this.iceServers);
   }
 
   private armStageTimer(memberId: string, peer: RTCPeerConnection): void {
@@ -437,8 +431,8 @@ export class HostStreamMesh {
   }
 
   private resolveNextAvailableStage(currentStage: HostStreamIceStage): HostStreamIceStage | null {
-    const currentIndex = ICE_STAGE_ORDER.indexOf(currentStage);
-    for (const stage of ICE_STAGE_ORDER.slice(currentIndex + 1)) {
+    const currentIndex = HOST_STREAM_ICE_STAGE_ORDER.indexOf(currentStage);
+    for (const stage of HOST_STREAM_ICE_STAGE_ORDER.slice(currentIndex + 1)) {
       if (stage === "ipv6" || this.resolveIceServers(stage).length > 0) return stage;
       console.warn(`[HostStream] ${stage} 阶段缺少 ICE 服务器配置，跳过该阶段`);
     }
@@ -512,4 +506,20 @@ export class HostStreamMesh {
     }
     return Number((this.sourceVideoHeight / profile.targetHeight).toFixed(2));
   }
+}
+
+export function resolveHostStreamIceServersForStage(stage: HostStreamIceStage, iceServers: IceServerConfig[]): IceServerConfig[] {
+  if (stage !== "relay") return [];
+  return iceServers.flatMap((server) => {
+    const urls = resolveServerUrls(server).filter((url) => url.startsWith("turn:") || url.startsWith("turns:"));
+    if (urls.length === 0) return [];
+    return [{
+      ...server,
+      urls: Array.isArray(server.urls) ? urls : urls[0]!
+    }];
+  });
+}
+
+function resolveServerUrls(server: IceServerConfig): string[] {
+  return Array.isArray(server.urls) ? server.urls : [server.urls];
 }

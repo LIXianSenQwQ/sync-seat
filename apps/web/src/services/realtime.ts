@@ -1,6 +1,11 @@
 import type { ClientRoomEvent, RoomState, ServerRoomEvent } from "@sync-seat/shared";
 import { io, type Socket } from "socket.io-client";
 
+export interface RoomStateSyncClock {
+  serverTimeMs: number;
+  receivedAtMs: number;
+}
+
 /**
  * 房间实时连接封装。
  *
@@ -13,7 +18,7 @@ export class RoomSocket {
     roomCode: string,
     memberId: string,
     nickname: string,
-    onState: (room: RoomState) => void,
+    onState: (room: RoomState, clock: RoomStateSyncClock) => void,
     onVoiceSignal: (event: Extract<ServerRoomEvent, { type: "voice_signal" }>) => void,
     onHostStreamSignal: (event: Extract<ServerRoomEvent, { type: "host_stream_signal" }>) => void,
     onHostControl: (event: Extract<ServerRoomEvent, { type: "host_control_command" }>) => void,
@@ -31,7 +36,7 @@ export class RoomSocket {
 
     // 步骤2：统一处理服务端房间事件。
     this.socket.on("room_event", (event: ServerRoomEvent) => {
-      if (event.type === "room_state") onState(event.room);
+      if (event.type === "room_state") onState(event.room, { serverTimeMs: event.serverTimeMs, receivedAtMs: performance.now() });
       if (event.type === "voice_signal") onVoiceSignal(event);
       if (event.type === "host_stream_signal") onHostStreamSignal(event);
       if (event.type === "host_control_command") onHostControl(event);

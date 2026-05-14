@@ -1,6 +1,6 @@
 import type { PlaybackState } from "@sync-seat/shared";
-import { describe, expect, it, vi } from "vitest";
-import { applyPlaybackState } from "./playback-sync";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { applyPlaybackState, targetPosition } from "./playback-sync";
 
 function createVideo(currentTime: number, playbackRate = 1, paused = false): HTMLVideoElement {
   return {
@@ -27,6 +27,32 @@ function state(patch: Partial<PlaybackState> = {}): PlaybackState {
 }
 
 describe("applyPlaybackState", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("使用服务端发送时间和本地单调时间，避免客户端系统时间偏差", () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-01-01T00:00:10.000Z").getTime());
+
+    const target = targetPosition(
+      state({ positionSeconds: 10, playbackRate: 1, stateUpdatedAt: "2026-01-01T00:00:00.000Z" }),
+      { serverTimeMs: new Date("2026-01-01T00:00:00.000Z").getTime(), receivedAtMs: 1000 },
+      1000
+    );
+
+    expect(target).toBe(10);
+  });
+
+  it("收到状态后只按本地 performance 增量继续推进", () => {
+    const target = targetPosition(
+      state({ positionSeconds: 10, playbackRate: 1.5, stateUpdatedAt: "2026-01-01T00:00:00.000Z" }),
+      { serverTimeMs: new Date("2026-01-01T00:00:01.000Z").getTime(), receivedAtMs: 100 },
+      2100
+    );
+
+    expect(target).toBeCloseTo(14.5);
+  });
+
   it("3 秒以内的播放偏差使用基础倍速乘轻微修正", async () => {
     const video = createVideo(9);
 

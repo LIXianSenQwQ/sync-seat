@@ -7,7 +7,7 @@ import { api } from "../services/api";
 import { HostStreamMesh, type HostStreamQuality } from "../services/host-stream";
 import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { getIdentity } from "../services/identity";
-import { RoomSocket } from "../services/realtime";
+import { RoomSocket, type RoomStateSyncClock } from "../services/realtime";
 import { resolveVoiceTurnIceServers, VoiceMesh } from "../services/voice";
 
 const route = useRoute();
@@ -16,6 +16,8 @@ const roomCode = computed(() => String(route.params.roomCode).toUpperCase());
 const identity = getIdentity();
 const password = ref("");
 const room = ref<RoomState | null>(null);
+const playbackSyncClock = ref<RoomStateSyncClock | null>(null);
+const playbackSyncClockVersion = ref<number | null>(null);
 const error = ref("");
 const directPlayerRef = ref<InstanceType<typeof CustomVideoPlayer> | null>(null);
 const hostPlayerRef = ref<InstanceType<typeof CustomVideoPlayer> | null>(null);
@@ -31,9 +33,6 @@ const volume = ref(1);
 const hostStream = shallowRef<HostStreamMesh | null>(null);
 /** 防止 ensureHostStream 并发调用时创建多个 HostStreamMesh 实例 */
 let hostStreamPromise: Promise<HostStreamMesh> | null = null;
-/** 服务端返回的客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏 */
-let clientIp = "";
-let clientIpPromise: Promise<string> | null = null;
 const localVideoUrl = ref("");
 const localVideoName = ref("");
 const remoteMediaStream = ref<MediaStream | null>(null);
@@ -56,10 +55,13 @@ const currentMember = computed(() => members.value.find((member) => member.membe
 const isOwner = computed(() => room.value?.ownerId === identity.memberId);
 const isDirectMode = computed(() => room.value?.watchMode === "direct");
 const isHostStreamMode = computed(() => room.value?.watchMode === "host-stream");
+const directPlaybackSyncClock = computed(() =>
+  room.value?.playbackState.version === playbackSyncClockVersion.value ? playbackSyncClock.value : null
+);
 const hostStreamDiagnosticLabels = computed(() => Object.entries(hostStreamDiagnostics.value).map(([memberId, diagnostics]) => {
   const member = members.value.find((item) => item.memberId === memberId);
   const name = member?.nickname ?? memberId;
-  const stageText = diagnostics.stage === "ipv6" ? "IPv6 优先" : diagnostics.stage === "ipv4" ? "IPv4 打洞" : "TURN 中继";
+  const stageText = diagnostics.stage === "relay" ? "TURN 中继" : "IPv6 优先";
   return `${name}: ${describeHostStreamRoute(diagnostics)} (${stageText}，${diagnostics.state})`;
 }));
 const hasTerminalHostStreamError = computed(() =>
@@ -75,7 +77,6 @@ async function join(): Promise<void> {
       password: password.value || undefined
     });
     connectSocket();
-    void ensureClientIp();
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -96,7 +97,6 @@ async function restoreIfMember(): Promise<boolean> {
       nickname: identity.nickname
     });
     connectSocket();
-    void ensureClientIp();
     if (room.value.watchMode === "direct") {
       await loadDirectory("/");
     }
@@ -111,7 +111,9 @@ function connectSocket(): void {
     roomCode.value,
     identity.memberId,
     identity.nickname,
-    async (nextRoom) => {
+    async (nextRoom, syncClock) => {
+      playbackSyncClock.value = syncClock;
+      playbackSyncClockVersion.value = nextRoom.playbackState.version;
       room.value = nextRoom;
       connected.value = true;
       await nextTick();
@@ -209,12 +211,12 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
   // 防止并发信令到达时创建多个 HostStreamMesh 实例导致 ICE candidates 分发到错误实例
   if (!hostStreamPromise) {
     hostStreamPromise = (async () => {
-      const [iceServers, localIp] = await Promise.all([api.getIceServers(), ensureClientIp()]);
+      const iceServers = await api.getIceServers();
       console.log(`[HostStream] ICE 服务器配置已获取，共 ${iceServers.length} 台`);
       hostStream.value = new HostStreamMesh(
         iceServers,
         identity.memberId,
-        localIp,
+        "",
         (targetMemberId, type, payload) => {
           send({
             type: type === "offer" ? "host_stream_offer" : type === "answer" ? "host_stream_answer" : "host_stream_ice_candidate",
@@ -245,26 +247,6 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
     })();
   }
   return hostStreamPromise;
-}
-
-async function ensureClientIp(): Promise<string> {
-  if (clientIp) return clientIp;
-  if (!clientIpPromise) {
-    clientIpPromise = api.getClientIp()
-      .then(({ ip }) => {
-        clientIp = ip;
-        console.log(`[HostStream] 客户端局域网 IP: ${ip}`);
-        return ip;
-      })
-      .catch((err) => {
-        console.warn("[HostStream] 获取客户端局域网 IP 失败，跳过 mDNS 候选修复:", err);
-        return "";
-      })
-      .finally(() => {
-        clientIpPromise = null;
-      });
-  }
-  return clientIpPromise;
 }
 
 function selectLocalVideo(event: Event): void {
@@ -488,6 +470,7 @@ onBeforeUnmount(() => {
             sync-mode
             :src="room.currentVideo.playUrl"
             :playback-state="room.playbackState"
+            :playback-sync-clock="directPlaybackSyncClock"
             :playback-rate-options="PLAYBACK_RATE_OPTIONS"
             :subtitle-track="room.currentSubtitle ? { src: room.currentSubtitle.trackUrl, label: '房间字幕', srclang: 'zh' } : null"
             @set-playback="handleDirectPlaybackIntent"
@@ -609,7 +592,7 @@ onBeforeUnmount(() => {
                 {{ hostStreamDiagnosticLabels.join('；') }}
               </p>
               <p v-if="hasTerminalHostStreamError" class="error">
-                P2P 与 TURN 中继均连接失败，请检查双方网络、防火墙、STUN/TURN 配置，以及公网访问是否使用 HTTPS
+                IPv6 直连与 TURN 中继均连接失败，请检查双方网络、防火墙、TURN 配置，以及公网访问是否使用 HTTPS
               </p>
             </template>
             <p v-else class="side-note">房主尚未开始推流</p>
