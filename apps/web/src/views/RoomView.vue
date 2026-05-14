@@ -8,7 +8,7 @@ import { HostStreamMesh, type HostStreamQuality } from "../services/host-stream"
 import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { getIdentity } from "../services/identity";
 import { RoomSocket } from "../services/realtime";
-import { VoiceMesh } from "../services/voice";
+import { resolveVoiceTurnIceServers, VoiceMesh } from "../services/voice";
 
 const route = useRoute();
 const router = useRouter();
@@ -43,6 +43,7 @@ const hostStreamDiagnostics = ref<Record<string, HostStreamIceDiagnostics>>({});
 const voiceIceState = ref<Record<string, RTCIceConnectionState>>({});
 const hostStreamQuality = ref<HostStreamQuality>("original");
 const voiceJoining = ref(false);
+const voiceRelayError = ref("");
 let roomRefreshTimer: number | null = null;
 
 const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
@@ -136,6 +137,11 @@ function connectSocket(): void {
     (reason) => {
       error.value = reason;
       room.value = null;
+      voice.value?.leave();
+      voice.value = null;
+      voiceJoined.value = false;
+      voiceRelayError.value = "";
+      voiceIceState.value = {};
       hostStream.value?.stop();
       remoteMediaStream.value = null;
       remoteStreamReady.value = false;
@@ -336,9 +342,13 @@ async function joinVoice(): Promise<void> {
   let localStream: MediaStream | null = null;
   voiceJoining.value = true;
   error.value = "";
+  voiceRelayError.value = "";
   try {
-    localStream = await requestMicrophoneStream();
     const iceServers = await api.getIceServers();
+    if (resolveVoiceTurnIceServers(iceServers).length === 0) {
+      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请联系部署者配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 WEBRTC_TURN_PASSWORD。");
+    }
+    localStream = await requestMicrophoneStream();
     voice.value = new VoiceMesh(iceServers, identity.memberId, (targetMemberId, type, payload) => {
       send({
         type: type === "offer" ? "voice_offer" : type === "answer" ? "voice_answer" : "voice_ice_candidate",
@@ -349,6 +359,12 @@ async function joinVoice(): Promise<void> {
       } as ClientRoomEvent);
     }, (memberId, state) => {
       voiceIceState.value = { ...voiceIceState.value, [memberId]: state };
+      if (state === "failed" || state === "disconnected") {
+        voiceRelayError.value = "语音 TURN 中继连接失败，请检查 TURN 域名、账号密码、3478 端口和 relay UDP 端口段是否可访问";
+      }
+      if (state === "connected" || state === "completed") {
+        voiceRelayError.value = "";
+      }
     });
     await voice.value.join(members.value, localStream);
     localStream = null;
@@ -360,6 +376,7 @@ async function joinVoice(): Promise<void> {
     voice.value?.leave();
     voice.value = null;
     error.value = normalizeVoiceError(err);
+    voiceRelayError.value = "";
   } finally {
     voiceJoining.value = false;
   }
@@ -393,6 +410,8 @@ function leaveVoice(): void {
   voiceJoined.value = false;
   voiceJoining.value = false;
   muted.value = false;
+  voiceRelayError.value = "";
+  voiceIceState.value = {};
   send({ type: "voice_leave", roomCode: roomCode.value, memberId: identity.memberId });
 }
 
@@ -425,6 +444,8 @@ onBeforeUnmount(() => {
   if (roomRefreshTimer) window.clearInterval(roomRefreshTimer);
   socket.close();
   voice.value?.leave();
+  voiceRelayError.value = "";
+  voiceIceState.value = {};
   hostStream.value?.stop();
   hostStream.value = null;
   hostStreamPromise = null;
@@ -524,6 +545,7 @@ onBeforeUnmount(() => {
             <span>语音总音量</span>
             <input v-model.number="volume" type="range" min="0" max="1" step="0.05" />
           </label>
+          <p v-if="voiceRelayError" class="error">{{ voiceRelayError }}</p>
           <small>当前身份：{{ currentMember?.nickname }}</small>
         </section>
 

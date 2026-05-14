@@ -12,8 +12,8 @@
 - 房间级倍速支持 `1x`、`1.25x`、`1.5x`、`2x`，所有成员都可以调整并同步到全房间。
 - 播放时间以服务端 `PlaybackState` 为权威：小偏差不抖动，2 秒内用临时倍速追赶，超过 2 秒直接校准，暂停时强制同步时间。
 - 房主推流模式支持房主选择本地视频，通过 WebRTC P2P mesh 推给观众；文件不上传后端。
-- 语音使用 WebRTC P2P mesh，支持加入、退出、静音和本地总音量。
-- 房主推流和语音可配置 STUN/TURN，并提供 ICE 路径诊断提示。
+- 语音使用 WebRTC TURN 中继，支持加入、退出、静音和本地总音量。
+- 房主推流可配置 STUN/TURN，并提供 ICE 路径诊断提示；语音强制使用 TURN 中继。
 - 后端使用内存保存房间状态，适合单机部署和临时房间。
 
 ## 技术栈
@@ -24,7 +24,7 @@
 - 共享类型：`@sync-seat/shared`
 - 媒体播放：浏览器原生 HTML5 video
 - 实时同步：WebSocket
-- 语音/推流：WebRTC P2P mesh
+- 语音：WebRTC TURN 中继；房主推流：WebRTC P2P mesh
 - 部署：Docker、Nginx、可选 acme.sh、可选 coturn
 
 ## 目录结构
@@ -72,6 +72,8 @@ docs/            PRD 和方案文档
 
 房主推流会按 IPv6 直连、IPv4 STUN 打洞、TURN 中继的路径逐步尝试。复杂 NAT、公司网络或运营商限制环境下，建议配置 TURN。
 
+语音连接始终强制使用 TURN 中继，不走局域网直连或 STUN 打洞。这样同网段、跨运营商、蜂窝流量等场景行为一致；如果 TURN 未配置、仍使用示例域名/密码或端口不可达，前端会拒绝加入语音或提示 TURN 中继连接失败。
+
 ## 环境变量
 
 复制 `.env.example` 为 `.env` 后按实际环境修改：
@@ -93,15 +95,15 @@ Copy-Item .env.example .env
 WebRTC 配置：
 
 - `WEBRTC_STUN_URLS`：STUN 地址，多个用英文逗号分隔；默认 `stun:stun.l.google.com:19302`。
-- `WEBRTC_TURN_URLS`：TURN 地址，多个用英文逗号分隔。
-- `WEBRTC_TURN_USERNAME`：TURN 用户名。
-- `WEBRTC_TURN_PASSWORD`：TURN 密码。
+- `WEBRTC_TURN_URLS`：TURN 地址，多个用英文逗号分隔；语音强制依赖该配置，例如 `turn:你的域名:3478?transport=udp,turn:你的域名:3478?transport=tcp`。
+- `WEBRTC_TURN_USERNAME`：TURN 用户名；必须与 coturn `--user` 配置一致。
+- `WEBRTC_TURN_PASSWORD`：TURN 密码；必须替换为真实强密码，不能使用示例值。
 
 Docker Compose 示例还包含证书和 TURN 相关变量：
 
 - `SYNC_SEAT_IMAGE`
 - `TARGET_DOMAIN`
-- `TURN_EXTERNAL_IP`
+- `TURN_EXTERNAL_IP`：服务器真实公网 IP，不能使用文档示例网段。
 - `TURN_PORT`
 - `TURN_REALM`
 - `Ali_Key`
@@ -197,7 +199,7 @@ docker run --rm -p 3000:3000 `
 - `acme`：通过 DNS-01 签发和续期证书。
 - `turn`：coturn 中继服务，供复杂网络下 WebRTC 使用。
 
-使用前需要替换域名、镜像名、AList/OpenList 凭据、DNS 凭据、TURN 外网 IP 和密码。
+使用前需要替换域名、镜像名、AList/OpenList 凭据、DNS 凭据、TURN 外网 IP 和密码。`TURN_EXTERNAL_IP` 必须填写服务器真实公网 IP；宿主机防火墙和云安全组都需要放行 `3478/tcp`、`3478/udp` 以及 `49160-49200/udp`。
 
 ## 关键接口
 
@@ -229,7 +231,7 @@ WebSocket：
 - 当前没有账号系统，房间身份保存在浏览器本地身份中。
 - 房间状态保存在后端内存中，重启后会丢失。
 - 当前设计面向单实例部署，不支持多实例共享房间状态。
-- 房间最多 3 人，语音和房主推流均采用 P2P mesh。
+- 房间最多 3 人；语音强制走 TURN 中继，房主推流采用 P2P mesh 并可回落到 TURN。
 - 不做媒体库、刮削、收藏、历史记录、播放列表、聊天。
 - 不做视频转码；浏览器必须能播放当前视频格式。
 - 直链模式会由后端代理当前视频内容，但不会隐藏部署者对 AList/OpenList 的整体访问能力边界；请务必配置 `ALLOWED_ROOT_PATHS`。
@@ -248,8 +250,8 @@ WebSocket：
 
 ### 语音没有声音
 
-确认浏览器已授权麦克风，公网部署使用 HTTPS，并检查双方是否成功加入语音。
+确认浏览器已授权麦克风，公网部署使用 HTTPS，并检查双方是否成功加入语音。语音强制使用 TURN 中继，如果没有配置 `WEBRTC_TURN_URLS` 或 coturn 端口不可达，页面会拒绝加入或提示 TURN 中继连接失败。
 
 ### 房主推流连接失败
 
-先看页面里的 ICE 诊断提示。如果 IPv4 STUN 打洞失败或双方网络复杂，请配置 TURN，并放行 `3478/tcp`、`3478/udp` 以及 coturn relay UDP 端口段。
+先看页面里的 ICE 诊断提示。如果 IPv4 STUN 打洞失败或双方网络复杂，请配置 TURN，并放行 `3478/tcp`、`3478/udp` 以及 coturn relay UDP 端口段。该机制只影响房主推流视频链路，语音始终直接使用 TURN 中继。

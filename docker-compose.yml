@@ -13,11 +13,11 @@ services:
       ALIST_USERNAME: admin
       ALIST_PASSWORD: replace-with-alist-password
       ALLOWED_ROOT_PATHS: /Movies,/Shows
-      # 房主推流按 IPv6 直连、IPv4 NAT 打洞、TURN 中继的顺序尝试连接。
-      WEBRTC_STUN_URLS: stun:stun.l.google.com:19302
-      WEBRTC_TURN_URLS: turn:api.91since.com:3478?transport=udp,turn:api.91since.com:3478?transport=tcp
-      WEBRTC_TURN_USERNAME: sync-seat
-      WEBRTC_TURN_PASSWORD: replace-with-strong-turn-password
+      # 视频房主推流仍按 IPv6 直连、IPv4 NAT 打洞、TURN 中继的顺序尝试；语音强制使用 TURN 中继。
+      WEBRTC_STUN_URLS: ${WEBRTC_STUN_URLS:-stun:stun.l.google.com:19302}
+      WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME}
+      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD}
       # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
       WEB_DIST_PATH: /app/apps/web/dist
       # 服务端文件日志默认写入 /app/logs，按天轮转后由下方 volume 持久化。
@@ -111,11 +111,11 @@ services:
     # TURN 不是 HTTP 服务，不经过 nginx；宿主机需放行 3478/tcp、3478/udp 和 49160-49200/udp。
     network_mode: host
     environment:
-      TURN_PORT: "3478"
-      TURN_REALM: api.91since.com
-      TURN_EXTERNAL_IP: 203.0.113.10
-      WEBRTC_TURN_USERNAME: sync-seat
-      WEBRTC_TURN_PASSWORD: replace-with-strong-turn-password
+      TURN_PORT: ${TURN_PORT:-3478}
+      TURN_REALM: ${TURN_REALM}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
+      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME}
+      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD}
     entrypoint: /bin/sh
     command:
       - -c

@@ -1,7 +1,7 @@
 import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 
 /**
- * WebRTC P2P 语音管理器。
+ * WebRTC TURN 中继语音管理器。
  *
  * @author 清羽
  */
@@ -10,15 +10,21 @@ export class VoiceMesh {
   private peers = new Map<string, RTCPeerConnection>();
   private remoteAudio = new Map<string, HTMLAudioElement>();
   private volume = 1;
+  private readonly turnIceServers: IceServerConfig[];
   /** 缓存在 setRemoteDescription 之前到达的 ICE candidate */
   private pendingCandidates = new Map<string, RTCIceCandidateInit[]>();
 
   constructor(
-    private readonly iceServers: IceServerConfig[],
+    iceServers: IceServerConfig[],
     private readonly memberId: string,
     private readonly sendSignal: (targetMemberId: string, type: "offer" | "answer" | "ice_candidate", payload: unknown) => void,
     private readonly onConnectionState?: (memberId: string, state: RTCIceConnectionState) => void
-  ) {}
+  ) {
+    this.turnIceServers = resolveVoiceTurnIceServers(iceServers);
+    if (this.turnIceServers.length === 0) {
+      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 WEBRTC_TURN_PASSWORD，不要使用 example.com 或示例密码。");
+    }
+  }
 
   /**
    * 加入房间语音。
@@ -95,10 +101,10 @@ export class VoiceMesh {
     const existing = this.peers.get(targetMemberId);
     if (existing) return existing;
 
-    const peer = new RTCPeerConnection({ iceServers: this.iceServers });
+    const peer = new RTCPeerConnection({ iceServers: this.turnIceServers, iceTransportPolicy: "relay" });
     this.peers.set(targetMemberId, peer);
 
-    // 步骤1：本地音频轨道加入每条 P2P 连接。
+    // 步骤1：本地音频轨道加入每条 TURN 中继语音连接。
     this.localStream?.getTracks().forEach((track) => peer.addTrack(track, this.localStream!));
 
     // 步骤2：远端音轨以隐藏 audio 元素播放，并受本地总音量控制。
@@ -130,4 +136,41 @@ export class VoiceMesh {
     }
     return peer;
   }
+}
+
+/**
+ * 语音只允许使用 TURN/TURNS 中继，避免浏览器回落到局域网直连或 STUN 打洞。
+ *
+ * @param iceServers 后端返回的完整 ICE 配置。
+ * @returns 语音可用的 TURN ICE 配置。
+ */
+export function resolveVoiceTurnIceServers(iceServers: IceServerConfig[]): IceServerConfig[] {
+  return iceServers
+    .map((server) => {
+      const urls = resolveServerUrls(server).filter((url) => isTurnUrl(url) && !isPlaceholderTurnUrl(url));
+      if (urls.length === 0 || !hasTurnCredentials(server)) return null;
+      return {
+        ...server,
+        urls: Array.isArray(server.urls) ? urls : urls[0]
+      };
+    })
+    .filter((server): server is IceServerConfig => Boolean(server));
+}
+
+function resolveServerUrls(server: IceServerConfig): string[] {
+  return Array.isArray(server.urls) ? server.urls : [server.urls];
+}
+
+function isTurnUrl(url: string): boolean {
+  const normalized = url.trim().toLowerCase();
+  return normalized.startsWith("turn:") || normalized.startsWith("turns:");
+}
+
+function isPlaceholderTurnUrl(url: string): boolean {
+  const normalized = url.trim().toLowerCase();
+  return normalized.includes("example.com") || normalized.includes("203.0.113.");
+}
+
+function hasTurnCredentials(server: IceServerConfig): boolean {
+  return Boolean(server.username?.trim() && server.credential?.trim() && server.credential.trim() !== "replace-with-strong-turn-password");
 }
