@@ -69,11 +69,10 @@ describe("VoiceMesh", () => {
     expect(() => new VoiceMesh([{ urls: "stun:stun.l.google.com:19302" }], "local-member", vi.fn())).toThrow("强制 TURN 中继");
   });
 
-  it("占位 TURN 或缺少凭据时视为不可用", () => {
+  it("缺少临时凭据时视为不可用", () => {
     expect(resolveVoiceTurnIceServers([
-      { urls: "turn:sync-seat.example.com:3478?transport=udp", username: "sync-seat", credential: "secret" },
-      { urls: "turn:turn.example.cn:3478?transport=udp", username: "sync-seat", credential: "replace-with-strong-turn-password" },
-      { urls: "turn:turn.example.cn:3478?transport=tcp" }
+      { urls: "turn:turn.example.cn:3478?transport=udp", username: "", credential: "secret" },
+      { urls: "turn:turn.example.cn:3478?transport=tcp", username: "123:sync-seat", credential: "" }
     ])).toEqual([]);
   });
 

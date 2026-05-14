@@ -72,7 +72,7 @@ docs/            PRD 和方案文档
 
 房主推流会按 IPv6 直连、IPv4 STUN 打洞、TURN 中继的路径逐步尝试。复杂 NAT、公司网络或运营商限制环境下，建议配置 TURN。
 
-语音连接始终强制使用 TURN 中继，不走局域网直连或 STUN 打洞。这样同网段、跨运营商、蜂窝流量等场景行为一致；如果 TURN 未配置、仍使用示例域名/密码或端口不可达，前端会拒绝加入语音或提示 TURN 中继连接失败。
+语音连接始终强制使用 TURN 中继，不走局域网直连或 STUN 打洞。这样同网段、跨运营商、蜂窝流量等场景行为一致；如果 TURN 未配置、临时凭据密钥缺失或端口不可达，前端会拒绝加入语音或提示 TURN 中继连接失败。
 
 ## 环境变量
 
@@ -96,20 +96,31 @@ WebRTC 配置：
 
 - `WEBRTC_STUN_URLS`：STUN 地址，多个用英文逗号分隔；默认 `stun:stun.l.google.com:19302`。
 - `WEBRTC_TURN_URLS`：TURN 地址，多个用英文逗号分隔；语音强制依赖该配置，例如 `turn:你的域名:3478?transport=udp,turn:你的域名:3478?transport=tcp`。
-- `WEBRTC_TURN_USERNAME`：TURN 用户名；必须与 coturn `--user` 配置一致。
-- `WEBRTC_TURN_PASSWORD`：TURN 密码；必须替换为真实强密码，不能使用示例值。
+- `WEBRTC_TURN_USERNAME`：临时 TURN 用户名前缀，后端会生成 `<过期时间戳>:<用户名>`。
+- `TURN_AUTH_SECRET`：app 和 coturn 共用的 shared secret，用于签发临时 TURN 凭据；必须替换为随机强密钥。
+- `TURN_CREDENTIAL_TTL_SECONDS`：临时 TURN 凭据有效期，默认 `3600` 秒。
 
 Docker Compose 示例还包含证书和 TURN 相关变量：
 
 - `SYNC_SEAT_IMAGE`
+- `NGINX_IMAGE`
+- `ACME_IMAGE`
+- `COTURN_IMAGE`
 - `TARGET_DOMAIN`
+- `NGINX_HTTP_HOST_PORT`
+- `NGINX_HTTPS_HOST_PORT`：HTTPS 宿主机端口，模板默认 `5173`，访问地址形如 `https://你的域名:5173`。
 - `TURN_EXTERNAL_IP`：服务器真实公网 IP，不能使用文档示例网段。
 - `TURN_PORT`
 - `TURN_REALM`
+- `OPENLIST_IMAGE`
+- `OPENLIST_HOST_PORT`：OpenList 后台宿主机端口，模板默认 `5244`。
+- `OPENLIST_PUID`
+- `OPENLIST_PGID`
+- `TZ`
 - `Ali_Key`
 - `Ali_Secret`
 
-这些值在真实部署时应只写入服务器本机 `.env` 或部署配置，不要提交真实凭据。
+这些值在真实部署时应只写入服务器本机 `.env` 或部署配置，不要提交真实域名密钥、OpenList 密码、阿里云 AccessKey 或 TURN shared secret。
 
 ## 本地开发
 
@@ -198,8 +209,19 @@ docker run --rm -p 3000:3000 `
 - `nginx`：反向代理 HTTPS、API、Socket.IO、视频 Range 请求。
 - `acme`：通过 DNS-01 签发和续期证书。
 - `turn`：coturn 中继服务，供复杂网络下 WebRTC 使用。
+- `openlist`：内置 OpenList 服务，数据持久化到 `./openlist`。
 
-使用前需要替换域名、镜像名、AList/OpenList 凭据、DNS 凭据、TURN 外网 IP 和密码。`TURN_EXTERNAL_IP` 必须填写服务器真实公网 IP；宿主机防火墙和云安全组都需要放行 `3478/tcp`、`3478/udp` 以及 `49160-49200/udp`。
+部署前先复制环境变量模板并只在服务器本机填写真实值：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+`docker-compose.yml` 会从 `.env` 读取域名、端口、镜像、OpenList 凭据、DNS 凭据、TURN 和日志参数。内置 OpenList 默认通过宿主机 `5244` 端口暴露后台，首次部署后可访问 `http://服务器IP:5244` 初始化和配置存储；Sync Seat 后端容器默认通过 Docker 内网地址 `http://openlist:5244` 访问它。
+
+模板默认把 Nginx HTTPS 映射到宿主机 `5173` 端口，因此公网访问地址形如 `https://你的域名:5173`。如需标准 HTTPS 端口，把 `.env` 里的 `NGINX_HTTPS_HOST_PORT` 改为 `443`，并同步调整 `WEB_ORIGIN` 和防火墙规则。
+
+使用前需要替换域名、镜像名、AList/OpenList 凭据、DNS 凭据、TURN 外网 IP 和 `TURN_AUTH_SECRET`。`TURN_AUTH_SECRET` 必须替换为随机强密钥；`TURN_EXTERNAL_IP` 必须填写服务器真实公网 IP；app 和 coturn 必须使用同一个 `TURN_AUTH_SECRET`；宿主机防火墙和云安全组都需要放行 `3478/tcp`、`3478/udp` 以及 `49160-49200/udp`。
 
 ## 关键接口
 
@@ -212,7 +234,8 @@ REST：
 - `GET /api/rooms/:roomCode/subtitle.vtt`：读取当前字幕 WebVTT。
 - `GET /api/drive/list?path=/...`：浏览网盘目录。
 - `GET /api/drive/subtitles?videoPath=/...`：列出视频同目录字幕。
-- `GET /api/drive/ice-servers`：获取 WebRTC ICE 配置。
+- `GET /api/drive/ice-servers`：获取房主推流 WebRTC ICE 配置，包含 STUN 和临时 TURN。
+- `GET /api/drive/voice-ice-servers`：获取语音 WebRTC ICE 配置，只包含临时 TURN，不返回 STUN。
 - `GET /api/drive/whoami`：获取服务端识别到的客户端 IP。
 
 WebSocket：
@@ -250,7 +273,7 @@ WebSocket：
 
 ### 语音没有声音
 
-确认浏览器已授权麦克风，公网部署使用 HTTPS，并检查双方是否成功加入语音。语音强制使用 TURN 中继，如果没有配置 `WEBRTC_TURN_URLS` 或 coturn 端口不可达，页面会拒绝加入或提示 TURN 中继连接失败。
+确认浏览器已授权麦克风，公网部署使用 HTTPS，并检查双方是否成功加入语音。语音强制使用 TURN 中继，如果没有配置 `WEBRTC_TURN_URLS`、`TURN_AUTH_SECRET` 或 coturn 端口不可达，页面会拒绝加入或提示 TURN 中继连接失败。
 
 ### 房主推流连接失败
 

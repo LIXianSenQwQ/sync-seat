@@ -344,9 +344,9 @@ async function joinVoice(): Promise<void> {
   error.value = "";
   voiceRelayError.value = "";
   try {
-    const iceServers = await api.getIceServers();
+    const iceServers = await api.getVoiceIceServers();
     if (resolveVoiceTurnIceServers(iceServers).length === 0) {
-      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请联系部署者配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 WEBRTC_TURN_PASSWORD。");
+      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请联系部署者配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 TURN_AUTH_SECRET。");
     }
     localStream = await requestMicrophoneStream();
     voice.value = new VoiceMesh(iceServers, identity.memberId, (targetMemberId, type, payload) => {

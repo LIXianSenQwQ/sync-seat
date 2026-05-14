@@ -1,45 +1,48 @@
 services:
   app:
-    image: ghcr.io/lixiansenqwq/sync-seat:latest
+    image: ${SYNC_SEAT_IMAGE}
     container_name: sync-seat-app
     restart: unless-stopped
+    depends_on:
+      - openlist
     environment:
       # 容器内应用监听端口需与 nginx.conf 的 app:3000 upstream 保持一致。
-      SERVER_PORT: "3000"
+      SERVER_PORT: ${SERVER_PORT:-3000}
       # 生产同源部署时应设置为 https://你的域名，供 CORS 和 Socket.IO 握手使用。
-      WEB_ORIGIN: https://api.91since.com
+      WEB_ORIGIN: ${WEB_ORIGIN}
       # AList/OpenList 访问配置只给后端容器使用，前端不会接触这些凭据。
-      ALIST_BASE_URL: https://alist.example.com
-      ALIST_USERNAME: admin
-      ALIST_PASSWORD: replace-with-alist-password
-      ALLOWED_ROOT_PATHS: /Movies,/Shows
+      ALIST_BASE_URL: ${ALIST_BASE_URL}
+      ALIST_USERNAME: ${ALIST_USERNAME}
+      ALIST_PASSWORD: ${ALIST_PASSWORD}
+      ALLOWED_ROOT_PATHS: ${ALLOWED_ROOT_PATHS}
       # 视频房主推流仍按 IPv6 直连、IPv4 NAT 打洞、TURN 中继的顺序尝试；语音强制使用 TURN 中继。
       WEBRTC_STUN_URLS: ${WEBRTC_STUN_URLS:-stun:stun.l.google.com:19302}
       WEBRTC_TURN_URLS: ${WEBRTC_TURN_URLS}
       WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME}
-      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD}
+      TURN_AUTH_SECRET: ${TURN_AUTH_SECRET}
+      TURN_CREDENTIAL_TTL_SECONDS: ${TURN_CREDENTIAL_TTL_SECONDS:-3600}
       # Dockerfile 会把 Vue 构建产物复制到该目录，Nest 启动时会自动托管。
       WEB_DIST_PATH: /app/apps/web/dist
       # 服务端文件日志默认写入 /app/logs，按天轮转后由下方 volume 持久化。
-      LOG_LEVEL: info
-      LOG_DIR: /app/logs
-      LOG_RETENTION_DAYS: 14d
-      LOG_MAX_FILE_SIZE: 20m
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      LOG_DIR: ${LOG_DIR:-/app/logs}
+      LOG_RETENTION_DAYS: ${LOG_RETENTION_DAYS:-14d}
+      LOG_MAX_FILE_SIZE: ${LOG_MAX_FILE_SIZE:-20m}
     expose:
       - "3000"
     volumes:
       - ./logs:/app/logs
 
   nginx:
-    image: docker.1ms.run/nginx:alpine
+    image: ${NGINX_IMAGE:-docker.1ms.run/nginx:alpine}
     container_name: sync-seat-nginx
     restart: unless-stopped
     depends_on:
       - app
       - acme
     ports:
-      - "80:80"
-      - "443:443"
+      - "${NGINX_HTTP_HOST_PORT:-80}:80"
+      - "${NGINX_HTTPS_HOST_PORT:-5173}:443"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./letsencrypt:/etc/nginx/certs:ro
@@ -55,14 +58,14 @@ services:
         exec nginx -g "daemon off;"
 
   acme:
-    image: docker.1panel.live/neilpang/acme.sh:latest
+    image: ${ACME_IMAGE:-docker.1panel.live/neilpang/acme.sh:latest}
     container_name: sync-seat-acme
     restart: unless-stopped
     environment:
       # DNS-01 签发所需的真实 AccessKey 只在服务器部署文件里替换，不提交真实值。
-      Ali_Key: replace-with-ali-key
-      Ali_Secret: replace-with-ali-secret
-      TARGET_DOMAIN: api.91since.com
+      Ali_Key: ${Ali_Key}
+      Ali_Secret: ${Ali_Secret}
+      TARGET_DOMAIN: ${TARGET_DOMAIN}
     volumes:
       - ./letsencrypt:/acme.sh
       - /var/run/docker.sock:/var/run/docker.sock
@@ -105,7 +108,7 @@ services:
         done
 
   turn:
-    image: docker.1panel.live/coturn/coturn:latest
+    image: ${COTURN_IMAGE:-docker.1panel.live/coturn/coturn:latest}
     container_name: sync-seat-turn
     restart: unless-stopped
     # TURN 不是 HTTP 服务，不经过 nginx；宿主机需放行 3478/tcp、3478/udp 和 49160-49200/udp。
@@ -114,8 +117,7 @@ services:
       TURN_PORT: ${TURN_PORT:-3478}
       TURN_REALM: ${TURN_REALM}
       TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
-      WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME}
-      WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD}
+      TURN_AUTH_SECRET: ${TURN_AUTH_SECRET}
     entrypoint: /bin/sh
     command:
       - -c
@@ -125,10 +127,25 @@ services:
           --realm="$${TURN_REALM}" \
           --server-name="$${TURN_REALM}" \
           --external-ip="$${TURN_EXTERNAL_IP}" \
-          --user="$${WEBRTC_TURN_USERNAME}:$${WEBRTC_TURN_PASSWORD}" \
+          --use-auth-secret \
+          --static-auth-secret="$${TURN_AUTH_SECRET}" \
           --min-port=49160 \
           --max-port=49200 \
           --fingerprint \
           --lt-cred-mech \
           --no-cli \
           --no-multicast-peers
+
+  openlist:
+    image: ${OPENLIST_IMAGE:-docker.1ms.run/openlistteam/openlist:beta-aio}
+    container_name: openlist
+    restart: unless-stopped
+    user: "${OPENLIST_PUID:-0}:${OPENLIST_PGID:-0}"
+    ports:
+      - "${OPENLIST_HOST_PORT:-5244}:5244"
+    environment:
+      OPLISTDX_PUID: ${OPENLIST_PUID:-0}
+      OPLISTDX_PGID: ${OPENLIST_PGID:-0}
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ./openlist:/opt/openlist/data

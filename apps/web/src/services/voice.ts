@@ -22,7 +22,7 @@ export class VoiceMesh {
   ) {
     this.turnIceServers = resolveVoiceTurnIceServers(iceServers);
     if (this.turnIceServers.length === 0) {
-      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 WEBRTC_TURN_PASSWORD，不要使用 example.com 或示例密码。");
+      throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 TURN_AUTH_SECRET。");
     }
   }
 
@@ -147,7 +147,7 @@ export class VoiceMesh {
 export function resolveVoiceTurnIceServers(iceServers: IceServerConfig[]): IceServerConfig[] {
   return iceServers
     .map((server) => {
-      const urls = resolveServerUrls(server).filter((url) => isTurnUrl(url) && !isPlaceholderTurnUrl(url));
+      const urls = resolveServerUrls(server).filter(isTurnUrl);
       if (urls.length === 0 || !hasTurnCredentials(server)) return null;
       return {
         ...server,
@@ -166,11 +166,6 @@ function isTurnUrl(url: string): boolean {
   return normalized.startsWith("turn:") || normalized.startsWith("turns:");
 }
 
-function isPlaceholderTurnUrl(url: string): boolean {
-  const normalized = url.trim().toLowerCase();
-  return normalized.includes("example.com") || normalized.includes("203.0.113.");
-}
-
 function hasTurnCredentials(server: IceServerConfig): boolean {
-  return Boolean(server.username?.trim() && server.credential?.trim() && server.credential.trim() !== "replace-with-strong-turn-password");
+  return Boolean(server.username?.trim() && server.credential?.trim());
 }

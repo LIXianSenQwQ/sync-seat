@@ -42,14 +42,26 @@ export class AlistController {
   }
 
   /**
-   * 返回 WebRTC ICE 配置。
+   * 返回房主推流 WebRTC ICE 配置。
    *
-   * @returns 浏览器可用的 ICE server 列表。
+   * @returns 浏览器可用的 STUN 和临时 TURN server 列表。
    */
   @Get("ice-servers")
   iceServers(): IceServerConfig[] {
     const servers = this.env.getIceServers();
     logInfo("AlistController", "REST 请求 ICE 配置", { serverCount: servers.length });
+    return servers;
+  }
+
+  /**
+   * 返回语音专用 WebRTC ICE 配置。
+   *
+   * @returns 只包含临时 TURN server，不包含 STUN。
+   */
+  @Get("voice-ice-servers")
+  voiceIceServers(): IceServerConfig[] {
+    const servers = this.env.getVoiceIceServers();
+    logInfo("AlistController", "REST 请求语音 ICE 配置", { serverCount: servers.length });
     return servers;
   }
 
