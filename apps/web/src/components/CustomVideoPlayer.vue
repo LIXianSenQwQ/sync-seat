@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Maximize, Minimize, Pause, Play, RotateCcw, Volume1, Volume2, VolumeX } from "lucide-vue-next";
+import { IconArrowsMaximize, IconArrowsMinimize, IconPlayerPause, IconPlayerPlay, IconRotate360, IconVolume, IconVolume2, IconVolumeOff } from "@tabler/icons-vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { PLAYBACK_RATE_OPTIONS, type PlaybackAction, type PlaybackState } from "@sync-seat/shared";
 import { applyPlaybackState, targetPosition, type PlaybackSyncClock } from "../services/playback-sync";
@@ -566,17 +566,17 @@ onBeforeUnmount(() => {
 
       <div class="player-control-row">
         <button class="player-icon-button" type="button" :title="playing ? '暂停' : '播放'" @click="userTogglePlayback">
-          <Pause v-if="playing" :size="20" />
-          <Play v-else :size="20" />
+          <IconPlayerPause v-if="playing" :size="20" />
+          <IconPlayerPlay v-else :size="20" />
         </button>
         <span v-if="showTime" class="player-time">{{ formatTime(displayTime) }} / {{ formatTime(safeDuration) }}</span>
 
         <div class="player-spacer"></div>
 
         <button v-if="showVolume" class="player-icon-button" type="button" :title="muted ? '取消静音' : '静音'" @click="muted = !muted">
-          <VolumeX v-if="muted || volume === 0" :size="20" />
-          <Volume1 v-else-if="volume < 0.6" :size="20" />
-          <Volume2 v-else :size="20" />
+          <IconVolumeOff v-if="muted || volume === 0" :size="20" />
+          <IconVolume v-else-if="volume < 0.6" :size="20" />
+          <IconVolume2 v-else :size="20" />
         </button>
         <input v-if="showVolume" v-model.number="volume" class="player-volume" type="range" min="0" max="1" step="0.05" aria-label="音量" />
 
@@ -594,11 +594,11 @@ onBeforeUnmount(() => {
         </div>
 
         <button v-if="showStepButtons" class="player-icon-button" type="button" title="回退 5 秒" @click="stepBy(-5)">
-          <RotateCcw :size="18" />
+          <IconRotate360 :size="18" />
         </button>
         <button class="player-icon-button" type="button" :title="isFullscreen ? '退出全屏' : '全屏'" @click="toggleFullscreen">
-          <Minimize v-if="isFullscreen" :size="20" />
-          <Maximize v-else :size="20" />
+          <IconArrowsMinimize v-if="isFullscreen" :size="20" />
+          <IconArrowsMaximize v-else :size="20" />
         </button>
       </div>
     </div>

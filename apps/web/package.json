@@ -11,10 +11,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@headlessui/vue": "^1.7.23",
     "@sync-seat/shared": "file:../../packages/shared",
+    "@tabler/icons-vue": "^3.44.0",
+    "@tailwindcss/vite": "^4.3.0",
     "@vitejs/plugin-vue": "^5.2.3",
-    "lucide-vue-next": "^1.0.0",
+    "@vueuse/motion": "^3.0.3",
+    "pinia": "^3.0.4",
     "socket.io-client": "^4.8.1",
+    "tailwindcss": "^4.3.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.1"
   },
