@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import type { RoomState } from "@sync-seat/shared";
+import type { MemberWatchProgressSnapshot, RoomState } from "@sync-seat/shared";
 import { IconCrown, IconPhone, IconPhoneOff, IconMicrophone, IconMicrophoneOff } from "@tabler/icons-vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 
-defineProps<{
+const props = defineProps<{
   members: RoomState["members"];
   ownerId: string | null;
+  isOwner: boolean;
+  memberProgressById: Record<string, MemberWatchProgressSnapshot>;
+  serverClockLabel: string;
   voiceJoined: boolean;
   voiceJoining: boolean;
   muted: boolean;
@@ -19,6 +23,38 @@ const emit = defineEmits<{
   toggleMute: [];
   "update:volume": [value: number];
 }>();
+
+const nowMs = ref(Date.now());
+let nowTimer: number | null = null;
+
+function formatTime(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "--:--";
+  const total = Math.floor(value);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function progressLabel(memberId: string): string {
+  const snapshot = props.memberProgressById[memberId];
+  if (!snapshot) return "--:--";
+  if (nowMs.value - Date.parse(snapshot.updatedAt) > 5000) return "--:--";
+  return formatTime(snapshot.positionSeconds);
+}
+
+onMounted(() => {
+  nowTimer = window.setInterval(() => {
+    nowMs.value = Date.now();
+  }, 1000);
+});
+
+onBeforeUnmount(() => {
+  if (nowTimer) window.clearInterval(nowTimer);
+});
 </script>
 
 <template>
@@ -83,6 +119,9 @@ const emit = defineEmits<{
 
     <!-- 成员列表 -->
     <div>
+      <p v-if="serverClockLabel" class="text-caption text-text-muted mb-1">
+        服务器时间 {{ serverClockLabel }}
+      </p>
       <p class="text-eyebrow text-text-muted mb-2">房间成员 · {{ members.length }}/3</p>
       <div class="flex flex-col gap-1">
         <div
@@ -117,6 +156,7 @@ const emit = defineEmits<{
             </div>
             <div class="flex items-center gap-1.5 text-caption text-text-muted">
               <span>{{ member.memberId === ownerId ? "房主" : "成员" }}</span>
+              <span v-if="isOwner">· {{ progressLabel(member.memberId) }}</span>
               <span v-if="member.voiceJoined" class="text-status-online">
                 · {{ member.muted ? "已静音" : "语音中" }}
               </span>

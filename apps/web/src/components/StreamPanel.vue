@@ -15,7 +15,6 @@ const emit = defineEmits<{
   "update:hostStreamQuality": [quality: string];
   startHostStream: [];
   stopHostStream: [];
-  requestHostControl: [command: { action: "play" | "pause" }];
 }>();
 </script>
 
@@ -89,23 +88,23 @@ const emit = defineEmits<{
         >
           IPv6 直连与 TURN 中继均连接失败，请检查双方网络、防火墙、TURN 配置，以及公网访问是否使用 HTTPS
         </p>
+
+        <div class="flex flex-col gap-1.5">
+          <span class="text-caption text-text-muted">清晰度</span>
+          <div class="flex rounded bg-white/6 p-0.5">
+            <button
+              v-for="option in hostStreamQualityOptions"
+              :key="option.value"
+              class="flex-1 py-1 rounded text-caption transition-colors"
+              :class="hostStreamQuality === option.value ? 'bg-brand-500 text-white' : 'text-text-muted hover:text-text-secondary'"
+              @click="emit('update:hostStreamQuality', option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+        </div>
       </template>
       <p v-else class="text-body-sm text-text-muted">房主尚未开始推流</p>
-
-      <div class="flex gap-2 mt-1">
-        <button
-          class="flex-1 py-1.5 rounded-button bg-white/8 text-text-secondary text-body-sm transition-colors hover:bg-white/14"
-          @click="emit('requestHostControl', { action: 'play' })"
-        >
-          请求播放
-        </button>
-        <button
-          class="flex-1 py-1.5 rounded-button bg-white/8 text-text-secondary text-body-sm transition-colors hover:bg-white/14"
-          @click="emit('requestHostControl', { action: 'pause' })"
-        >
-          请求暂停
-        </button>
-      </div>
     </template>
   </div>
 </template>

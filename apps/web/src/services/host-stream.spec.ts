@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { HOST_STREAM_ICE_STAGE_ORDER, resolveHostStreamIceServersForStage } from "./host-stream";
+import { describe, expect, it, vi } from "vitest";
+import { HOST_STREAM_ICE_STAGE_ORDER, HostStreamMesh, resolveHostStreamIceServersForStage } from "./host-stream";
 
 describe("HostStreamMesh ICE stages", () => {
   it("房主推流暂时只走 IPv6 直连，不通后直接 TURN", () => {
@@ -25,5 +25,29 @@ describe("HostStreamMesh ICE stages", () => {
       }
     ]);
     expect(resolveHostStreamIceServersForStage("ipv4", servers)).toEqual([]);
+  });
+
+  it("按成员切换清晰度时只更新该成员的视频 sender", async () => {
+    const firstSender = {
+      getParameters: vi.fn(() => ({ encodings: [{}] })),
+      setParameters: vi.fn(async (_params: RTCRtpSendParameters) => undefined)
+    };
+    const secondSender = {
+      getParameters: vi.fn(() => ({ encodings: [{}] })),
+      setParameters: vi.fn(async (_params: RTCRtpSendParameters) => undefined)
+    };
+    const mesh = new HostStreamMesh([], "owner", "", vi.fn(), vi.fn());
+    const internal = mesh as unknown as {
+      videoSendersByMember: Map<string, Set<typeof firstSender>>;
+    };
+    internal.videoSendersByMember.set("viewer-a", new Set([firstSender]));
+    internal.videoSendersByMember.set("viewer-b", new Set([secondSender]));
+
+    await mesh.setMemberQuality("viewer-a", "smooth");
+
+    expect(firstSender.setParameters).toHaveBeenCalledOnce();
+    expect(secondSender.setParameters).not.toHaveBeenCalled();
+    const sentParameters = firstSender.setParameters.mock.calls[0]?.[0];
+    expect(sentParameters?.encodings?.[0]?.maxBitrate).toBe(2_500_000);
   });
 });

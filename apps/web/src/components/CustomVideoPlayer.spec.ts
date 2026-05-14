@@ -198,4 +198,76 @@ describe("CustomVideoPlayer", () => {
 
     expect(exposed.getVideoElement()).toBe(wrapper.find("video").element);
   });
+
+  it("观众推流模式按房主快照显示只读真实进度", async () => {
+    const updatedAt = new Date(Date.now() - 5000).toISOString();
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "",
+        mediaStream: new MediaStream(),
+        readonlyProgress: true,
+        progressSnapshot: {
+          durationSeconds: 120,
+          positionSeconds: 30,
+          playing: false,
+          playbackRate: 1,
+          updatedAt
+        }
+      }
+    });
+
+    expect(wrapper.find(".player-time").text()).toBe("00:30 / 02:00");
+    expect((wrapper.find(".player-progress-played").element as HTMLElement).style.width).toBe("25%");
+  });
+
+  it("只读进度条不会拖动底层 video，也不会发送同步事件", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "",
+        readonlyProgress: true,
+        progressSnapshot: {
+          durationSeconds: 100,
+          positionSeconds: 20,
+          playing: false,
+          playbackRate: 1,
+          updatedAt: new Date().toISOString()
+        }
+      }
+    });
+    const video = wrapper.find("video").element as HTMLVideoElement;
+    const progress = wrapper.find(".player-progress");
+    prepareVideo(video);
+    prepareProgress(progress.element);
+    video.currentTime = 20;
+
+    await progress.trigger("pointerdown", { clientX: 100, pointerId: 1 });
+    await progress.trigger("pointerup", { clientX: 160, pointerId: 1 });
+
+    expect(video.currentTime).toBe(20);
+    expect(wrapper.emitted("set-playback")).toBeUndefined();
+  });
+
+  it("请求房主控制模式下播放按钮只发送请求，不直接播放或暂停远端流", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "",
+        controlMode: "request-host",
+        progressSnapshot: {
+          durationSeconds: 100,
+          positionSeconds: 20,
+          playing: true,
+          playbackRate: 1,
+          updatedAt: new Date().toISOString()
+        }
+      }
+    });
+    const video = wrapper.find("video").element as HTMLVideoElement;
+    prepareVideo(video);
+
+    await wrapper.find("button[title='请求暂停']").trigger("click");
+
+    expect(video.play).not.toHaveBeenCalled();
+    expect(video.pause).not.toHaveBeenCalled();
+    expect(wrapper.emitted("request-host-control")?.[0]?.[0]).toEqual({ action: "pause" });
+  });
 });

@@ -21,6 +21,9 @@ export class RoomSocket {
     onState: (room: RoomState, clock: RoomStateSyncClock) => void,
     onVoiceSignal: (event: Extract<ServerRoomEvent, { type: "voice_signal" }>) => void,
     onHostStreamSignal: (event: Extract<ServerRoomEvent, { type: "host_stream_signal" }>) => void,
+    onHostStreamPlaybackSnapshot: (event: Extract<ServerRoomEvent, { type: "host_stream_playback_snapshot" }>) => void,
+    onHostStreamQualityCommand: (event: Extract<ServerRoomEvent, { type: "host_stream_quality_command" }>) => void,
+    onMemberWatchProgressUpdate: (event: Extract<ServerRoomEvent, { type: "member_watch_progress_update" }>) => void,
     onHostControl: (event: Extract<ServerRoomEvent, { type: "host_control_command" }>) => void,
     onClosed: (reason: string) => void,
     onError: (message: string) => void
@@ -39,6 +42,9 @@ export class RoomSocket {
       if (event.type === "room_state") onState(event.room, { serverTimeMs: event.serverTimeMs, receivedAtMs: performance.now() });
       if (event.type === "voice_signal") onVoiceSignal(event);
       if (event.type === "host_stream_signal") onHostStreamSignal(event);
+      if (event.type === "host_stream_playback_snapshot") onHostStreamPlaybackSnapshot(event);
+      if (event.type === "host_stream_quality_command") onHostStreamQualityCommand(event);
+      if (event.type === "member_watch_progress_update") onMemberWatchProgressUpdate(event);
       if (event.type === "host_control_command") onHostControl(event);
       if (event.type === "room_closed") onClosed(event.reason);
       if (event.type === "room_error") onError(event.message);

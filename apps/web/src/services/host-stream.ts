@@ -1,4 +1,4 @@
-import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
+import type { HostStreamQuality, IceServerConfig, RoomMember } from "@sync-seat/shared";
 import {
   canReplaceMdnsCandidate,
   candidateMatchesHostStreamStage,
@@ -15,7 +15,6 @@ import {
 } from "./ice-diagnostics";
 
 type HostSignalType = "offer" | "answer" | "ice_candidate";
-export type HostStreamQuality = "original" | "standard" | "smooth";
 
 interface HostStreamDescriptionPayload {
   description: RTCSessionDescriptionInit;
@@ -91,6 +90,8 @@ export class HostStreamMesh {
   private iceDiagnostics = new Map<string, HostStreamIceDiagnostics>();
   private stageTimers = new Map<string, number>();
   private videoSenders = new Set<RTCRtpSender>();
+  private videoSendersByMember = new Map<string, Set<RTCRtpSender>>();
+  private memberQualities = new Map<string, HostStreamQuality>();
   private sourceVideoHeight = 0;
   private quality: HostStreamQuality = "original";
   /** 缓存在 setRemoteDescription 之前到达的 ICE candidate */
@@ -132,7 +133,17 @@ export class HostStreamMesh {
   async setQuality(quality: HostStreamQuality): Promise<void> {
     this.quality = quality;
     this.applyTrackContentHint();
-    await Promise.all(Array.from(this.videoSenders).map((sender) => this.applySenderQuality(sender)));
+    await Promise.all(Array.from(this.videoSenders).map((sender) => this.applySenderQuality(sender, quality)));
+  }
+
+  /**
+   * 按观众单独切换房主推流清晰度，避免一个观众的网络选择影响其他观众。
+   */
+  async setMemberQuality(memberId: string, quality: HostStreamQuality): Promise<void> {
+    this.memberQualities.set(memberId, quality);
+    const senders = this.videoSendersByMember.get(memberId);
+    if (!senders) return;
+    await Promise.all(Array.from(senders).map((sender) => this.applySenderQuality(sender, quality)));
   }
 
   /**
@@ -225,6 +236,8 @@ export class HostStreamMesh {
     this.peerStages.clear();
     this.iceDiagnostics.clear();
     this.videoSenders.clear();
+    this.videoSendersByMember.clear();
+    this.memberQualities.clear();
     this.localStream = null;
     this.remoteStream = null;
     this.sourceVideoHeight = 0;
@@ -243,6 +256,7 @@ export class HostStreamMesh {
     if (existing) {
       this.clearStageTimer(targetMemberId);
       existing.close();
+      this.discardPeerMediaState(targetMemberId);
       this.peers.delete(targetMemberId);
       this.pendingCandidates.delete(targetMemberId);
     }
@@ -258,6 +272,7 @@ export class HostStreamMesh {
       }
       this.clearStageTimer(targetMemberId);
       existing.close();
+      this.discardPeerMediaState(targetMemberId);
       this.peers.delete(targetMemberId);
       this.pendingCandidates.delete(targetMemberId);
     }
@@ -285,7 +300,10 @@ export class HostStreamMesh {
       const sender = peer.addTrack(track, this.localStream!);
       if (track.kind === "video") {
         this.videoSenders.add(sender);
-        await this.applySenderQuality(sender);
+        const senders = this.videoSendersByMember.get(targetMemberId) ?? new Set<RTCRtpSender>();
+        senders.add(sender);
+        this.videoSendersByMember.set(targetMemberId, senders);
+        await this.applySenderQuality(sender, this.memberQualities.get(targetMemberId) ?? this.quality);
       }
     }
 
@@ -337,6 +355,12 @@ export class HostStreamMesh {
       }
       if (peer.iceConnectionState === "failed") {
         void this.fallbackIceStage(targetMemberId, peer);
+      }
+    };
+
+    peer.onconnectionstatechange = () => {
+      if (peer.connectionState === "closed" || peer.connectionState === "failed") {
+        this.discardPeerMediaState(targetMemberId);
       }
     };
 
@@ -424,6 +448,7 @@ export class HostStreamMesh {
     if (!nextStage) return;
     this.clearStageTimer(memberId);
     peer.close();
+    this.discardPeerMediaState(memberId);
     this.peers.delete(memberId);
     this.pendingCandidates.delete(memberId);
     console.warn(`[HostStream] ICE ${currentStage} 阶段失败，回落到 ${nextStage} 阶段 (${memberId})`);
@@ -472,8 +497,8 @@ export class HostStreamMesh {
     });
   }
 
-  private async applySenderQuality(sender: RTCRtpSender): Promise<void> {
-    const profile = QUALITY_PROFILES[this.quality];
+  private async applySenderQuality(sender: RTCRtpSender, quality = this.quality): Promise<void> {
+    const profile = QUALITY_PROFILES[quality];
     const params = sender.getParameters() as ConfigurableSendParameters;
     params.encodings = params.encodings?.length ? params.encodings : [{}];
     params.encodings[0] = {
@@ -498,6 +523,12 @@ export class HostStreamMesh {
         console.warn(`[HostStream] 应用${profile.label}清晰度失败，浏览器将使用默认编码策略:`, fallbackErr);
       }
     }
+  }
+
+  private discardPeerMediaState(memberId: string): void {
+    const senders = this.videoSendersByMember.get(memberId);
+    senders?.forEach((sender) => this.videoSenders.delete(sender));
+    this.videoSendersByMember.delete(memberId);
   }
 
   private resolveScaleResolutionDownBy(profile: QualityProfile): number {

@@ -147,6 +147,53 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.broadcastState(roomName, this.rooms.stopHostStream(roomCode, event.memberId));
       return;
     }
+    if (event.type === "host_stream_playback_snapshot") {
+      const ownerId = this.rooms.getOwnerId(roomCode);
+      if (event.memberId !== ownerId) {
+        this.emitRoomError(roomCode, event.memberId, "只有房主可以同步推流播放进度");
+        return;
+      }
+      this.server.to(roomName).emit("room_event", {
+        type: "host_stream_playback_snapshot",
+        fromMemberId: event.memberId,
+        durationSeconds: event.durationSeconds,
+        positionSeconds: event.positionSeconds,
+        playing: event.playing,
+        playbackRate: event.playbackRate,
+        updatedAt: event.updatedAt
+      });
+      return;
+    }
+    if (event.type === "host_stream_quality_request") {
+      const command = {
+        type: "host_stream_quality_command",
+        fromMemberId: event.memberId,
+        quality: event.quality
+      };
+      for (const socketId of this.realtime.targetSocketIds(roomCode, this.rooms.getOwnerId(roomCode))) {
+        this.server.to(socketId).emit("room_event", command);
+      }
+      logInfo("RoomGateway", "转发观众推流清晰度请求", {
+        roomCode,
+        fromMemberId: event.memberId,
+        quality: event.quality
+      });
+      return;
+    }
+    if (event.type === "member_watch_progress_report") {
+      const progress = {
+        type: "member_watch_progress_update",
+        fromMemberId: event.memberId,
+        positionSeconds: event.positionSeconds,
+        durationSeconds: event.durationSeconds,
+        playing: event.playing,
+        updatedAt: event.updatedAt
+      };
+      for (const socketId of this.realtime.targetSocketIds(roomCode, this.rooms.getOwnerId(roomCode))) {
+        this.server.to(socketId).emit("room_event", progress);
+      }
+      return;
+    }
     if (event.type === "host_control_request") {
       const command: { type: "host_control_command"; fromMemberId: string } & HostControlCommand = {
         type: "host_control_command",

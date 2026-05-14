@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { DriveEntry } from "@sync-seat/shared";
+import type { DriveEntry, MemberWatchProgressSnapshot } from "@sync-seat/shared";
 import FunctionNav, { type FunctionSection } from "./FunctionNav.vue";
 import FileTree from "./FileTree.vue";
 import MemberVoicePanel from "./MemberVoicePanel.vue";
@@ -31,6 +31,8 @@ defineProps<{
   roomStreaming: boolean;
   members: RoomState["members"];
   currentMember: RoomState["members"][number] | undefined;
+  memberProgressById: Record<string, MemberWatchProgressSnapshot>;
+  serverClockLabel: string;
 }>();
 
 const emit = defineEmits<{
@@ -46,7 +48,6 @@ const emit = defineEmits<{
   "update:hostStreamQuality": [quality: string];
   startHostStream: [];
   stopHostStream: [];
-  requestHostControl: [command: { action: "play" | "pause" }];
   selectSubtitle: [path: string | null];
 }>();
 </script>
@@ -68,6 +69,9 @@ const emit = defineEmits<{
         <MemberVoicePanel
           :members="members"
           :owner-id="room?.ownerId ?? null"
+          :is-owner="isOwner"
+          :member-progress-by-id="memberProgressById"
+          :server-clock-label="serverClockLabel"
           :voice-joined="voiceJoined"
           :voice-joining="voiceJoining"
           :muted="muted"
@@ -108,7 +112,6 @@ const emit = defineEmits<{
           @update:host-stream-quality="emit('update:hostStreamQuality', $event)"
           @start-host-stream="emit('startHostStream')"
           @stop-host-stream="emit('stopHostStream')"
-          @request-host-control="emit('requestHostControl', $event)"
         />
       </div>
 

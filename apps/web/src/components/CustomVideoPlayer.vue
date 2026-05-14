@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { IconArrowsMaximize, IconArrowsMinimize, IconPlayerPause, IconPlayerPlay, IconRotate360, IconVolume, IconVolume2, IconVolumeOff } from "@tabler/icons-vue";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { PLAYBACK_RATE_OPTIONS, type PlaybackAction, type PlaybackState } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type HostControlCommand, type HostStreamPlaybackSnapshot, type PlaybackAction, type PlaybackState } from "@sync-seat/shared";
 import { applyPlaybackState, targetPosition, type PlaybackSyncClock } from "../services/playback-sync";
 
 interface SubtitleTrack {
@@ -24,8 +24,11 @@ const props = withDefaults(
     mediaStream?: MediaStream | null;
     playbackState?: PlaybackState | null;
     playbackSyncClock?: PlaybackSyncClock | null;
+    progressSnapshot?: HostStreamPlaybackSnapshot | null;
     subtitleTrack?: SubtitleTrack | null;
     syncMode?: boolean;
+    readonlyProgress?: boolean;
+    controlMode?: "local" | "request-host";
     playbackRateOptions?: readonly number[];
     showProgress?: boolean;
     showTime?: boolean;
@@ -38,8 +41,11 @@ const props = withDefaults(
     mediaStream: null,
     playbackState: null,
     playbackSyncClock: null,
+    progressSnapshot: null,
     subtitleTrack: null,
     syncMode: false,
+    readonlyProgress: false,
+    controlMode: "local",
     playbackRateOptions: () => PLAYBACK_RATE_OPTIONS,
     showProgress: true,
     showTime: true,
@@ -52,6 +58,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   "set-playback": [intent: SetPlaybackIntent];
+  "request-host-control": [command: HostControlCommand];
 }>();
 
 const VOLUME_KEY = "sync-seat:player-volume";
@@ -74,6 +81,7 @@ const controlsVisible = ref(true);
 const isNativeFullscreen = ref(false);
 const isPseudoFullscreen = ref(false);
 const remotePlayBlocked = ref(false);
+const snapshotNow = ref(Date.now());
 let wasPlayingBeforeDrag = false;
 let rafId = 0;
 let hideControlsTimer: number | null = null;
@@ -81,8 +89,24 @@ let deferredRemoteState: PlaybackState | null = null;
 let lastAppliedVersion = -1;
 const PSEUDO_FULLSCREEN_BODY_CLASS = "custom-player-pseudo-fullscreen-open";
 
-const safeDuration = computed(() => (Number.isFinite(duration.value) && duration.value > 0 ? duration.value : 0));
+const snapshotPosition = computed(() => {
+  const snapshot = props.progressSnapshot;
+  if (!snapshot) return null;
+  const basePosition = Number.isFinite(snapshot.positionSeconds) ? snapshot.positionSeconds : 0;
+  const durationSeconds = Number.isFinite(snapshot.durationSeconds) ? Math.max(0, snapshot.durationSeconds) : 0;
+  if (!snapshot.playing) return durationSeconds ? Math.min(basePosition, durationSeconds) : Math.max(0, basePosition);
+  const updatedAtMs = Date.parse(snapshot.updatedAt);
+  const elapsedSeconds = Number.isFinite(updatedAtMs) ? Math.max(0, (snapshotNow.value - updatedAtMs) / 1000) : 0;
+  const nextPosition = basePosition + elapsedSeconds * snapshot.playbackRate;
+  return durationSeconds ? Math.min(nextPosition, durationSeconds) : Math.max(0, nextPosition);
+});
+const safeDuration = computed(() => {
+  const snapshotDuration = props.progressSnapshot?.durationSeconds;
+  if (Number.isFinite(snapshotDuration) && snapshotDuration! > 0) return snapshotDuration!;
+  return Number.isFinite(duration.value) && duration.value > 0 ? duration.value : 0;
+});
 const displayTime = computed(() => {
+  if (snapshotPosition.value !== null) return snapshotPosition.value;
   if (dragging.value) return dragPosition.value;
   if (pendingSeekTarget.value !== null) return pendingSeekTarget.value;
   return currentTime.value;
@@ -98,9 +122,10 @@ const bufferedPercent = computed(() => {
   return Math.min(100, (end / safeDuration.value) * 100);
 });
 const sliderValue = computed(() => Math.round(displayTime.value));
-const rateValue = computed(() => props.playbackState?.playbackRate ?? videoRef.value?.playbackRate ?? 1);
+const rateValue = computed(() => props.progressSnapshot?.playbackRate ?? props.playbackState?.playbackRate ?? videoRef.value?.playbackRate ?? 1);
 const showLoading = computed(() => waiting.value || pendingSeekTarget.value !== null);
 const isFullscreen = computed(() => isNativeFullscreen.value || isPseudoFullscreen.value);
+const effectivePlaying = computed(() => props.controlMode === "request-host" ? Boolean(props.progressSnapshot?.playing) : playing.value);
 
 function getVideoElement(): HTMLVideoElement | null {
   return videoRef.value;
@@ -162,6 +187,10 @@ async function userTogglePlayback(): Promise<void> {
   if (!video) return;
   showControls();
   remotePlayBlocked.value = false;
+  if (props.controlMode === "request-host") {
+    emit("request-host-control", { action: props.progressSnapshot?.playing ? "pause" : "play" });
+    return;
+  }
   if (playing.value || props.playbackState?.playing) {
     video.pause();
     playing.value = false;
@@ -185,11 +214,13 @@ function isInteractiveControl(target: EventTarget | null): boolean {
 
 function handlePlayerClick(event: MouseEvent): void {
   showControls();
+  if (props.controlMode === "request-host") return;
   if (isInteractiveControl(event.target)) return;
   void userTogglePlayback();
 }
 
 function userChangeRate(nextRate: number): void {
+  if (props.readonlyProgress) return;
   const video = videoRef.value;
   if (!video) return;
   video.playbackRate = nextRate;
@@ -211,7 +242,7 @@ function pointerToPosition(event: PointerEvent): number {
 
 function startDrag(event: PointerEvent): void {
   const video = videoRef.value;
-  if (!video || !props.showProgress || !safeDuration.value) return;
+  if (!video || props.readonlyProgress || !props.showProgress || !safeDuration.value) return;
   event.preventDefault();
   progressRef.value?.setPointerCapture(event.pointerId);
   wasPlayingBeforeDrag = playing.value || Boolean(props.playbackState?.playing);
@@ -258,7 +289,7 @@ function cancelDrag(): void {
 
 function stepBy(seconds: number): void {
   const video = videoRef.value;
-  if (!video || !props.showProgress || !safeDuration.value) return;
+  if (!video || props.readonlyProgress || !props.showProgress || !safeDuration.value) return;
   const target = clampPosition(displayTime.value + seconds);
   pendingSeekTarget.value = target;
   waiting.value = true;
@@ -273,11 +304,11 @@ function handlePlayerKeydown(event: KeyboardEvent): void {
   }
   if (event.key === "ArrowLeft") {
     event.preventDefault();
-    stepBy(-5);
+    if (!props.readonlyProgress) stepBy(-5);
   }
   if (event.key === "ArrowRight") {
     event.preventDefault();
-    stepBy(5);
+    if (!props.readonlyProgress) stepBy(5);
   }
   if (event.key.toLowerCase() === "m") {
     event.preventDefault();
@@ -388,7 +419,7 @@ function showControls(): void {
     window.clearTimeout(hideControlsTimer);
     hideControlsTimer = null;
   }
-  if (!playing.value || dragging.value || waiting.value || mediaError.value || remotePlayBlocked.value) return;
+  if (!effectivePlaying.value || dragging.value || waiting.value || mediaError.value || remotePlayBlocked.value) return;
   hideControlsTimer = window.setTimeout(() => {
     controlsVisible.value = false;
   }, 2500);
@@ -434,6 +465,7 @@ function handleFullscreenChange(): void {
 }
 
 function frame(): void {
+  snapshotNow.value = Date.now();
   onRuntimeUpdate();
   rafId = window.requestAnimationFrame(frame);
 }
@@ -547,8 +579,9 @@ onBeforeUnmount(() => {
         v-if="showProgress"
         ref="progressRef"
         class="player-progress"
+        :class="{ readonly: readonlyProgress }"
         role="slider"
-        tabindex="0"
+        :tabindex="readonlyProgress ? -1 : 0"
         :aria-valuemin="0"
         :aria-valuemax="Math.max(0, Math.round(safeDuration))"
         :aria-valuenow="sliderValue"
@@ -565,8 +598,13 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="player-control-row">
-        <button class="player-icon-button" type="button" :title="playing ? '暂停' : '播放'" @click="userTogglePlayback">
-          <IconPlayerPause v-if="playing" :size="20" />
+        <button
+          class="player-icon-button"
+          type="button"
+          :title="controlMode === 'request-host' ? (effectivePlaying ? '请求暂停' : '请求播放') : (playing ? '暂停' : '播放')"
+          @click="userTogglePlayback"
+        >
+          <IconPlayerPause v-if="effectivePlaying" :size="20" />
           <IconPlayerPlay v-else :size="20" />
         </button>
         <span v-if="showTime" class="player-time">{{ formatTime(displayTime) }} / {{ formatTime(safeDuration) }}</span>
@@ -719,6 +757,10 @@ onBeforeUnmount(() => {
   height: 22px;
   cursor: pointer;
   touch-action: none;
+}
+
+.player-progress.readonly {
+  cursor: default;
 }
 
 .player-progress-track,

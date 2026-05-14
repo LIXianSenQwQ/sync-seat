@@ -90,6 +90,13 @@ export type PlaybackAction = "play" | "pause" | "seek" | "playback_rate_change" 
 export type WatchMode = "direct" | "host-stream";
 
 /**
+ * 房主推流模式可选的单观众清晰度。
+ *
+ * @author 清羽
+ */
+export type HostStreamQuality = "original" | "standard" | "smooth";
+
+/**
  * 房主推流模式的开播状态。
  *
  * @author 清羽
@@ -112,6 +119,31 @@ export interface HostControlCommand {
   action: "play" | "pause" | "seek" | "playback_rate_change";
   positionSeconds?: number;
   playbackRate?: number;
+}
+
+/**
+ * 房主推流模式中由房主广播给观众的本地播放器进度快照。
+ *
+ * @author 清羽
+ */
+export interface HostStreamPlaybackSnapshot {
+  durationSeconds: number;
+  positionSeconds: number;
+  playing: boolean;
+  playbackRate: number;
+  updatedAt: string;
+}
+
+/**
+ * 成员客户端上报给房主查看的本地观看进度。
+ *
+ * @author 清羽
+ */
+export interface MemberWatchProgressSnapshot {
+  positionSeconds: number;
+  durationSeconds: number;
+  playing: boolean;
+  updatedAt: string;
 }
 
 /**
@@ -189,6 +221,9 @@ export type ClientRoomEvent =
   | { type: "voice_ice_candidate"; roomCode: string; memberId: string; targetMemberId: string; candidate: unknown }
   | { type: "host_stream_start"; roomCode: string; memberId: string; fileName: string }
   | { type: "host_stream_stop"; roomCode: string; memberId: string }
+  | ({ type: "host_stream_playback_snapshot"; roomCode: string; memberId: string } & HostStreamPlaybackSnapshot)
+  | { type: "host_stream_quality_request"; roomCode: string; memberId: string; quality: HostStreamQuality }
+  | ({ type: "member_watch_progress_report"; roomCode: string; memberId: string } & MemberWatchProgressSnapshot)
   | { type: "host_stream_offer"; roomCode: string; memberId: string; targetMemberId: string; description: unknown }
   | { type: "host_stream_answer"; roomCode: string; memberId: string; targetMemberId: string; description: unknown }
   | { type: "host_stream_ice_candidate"; roomCode: string; memberId: string; targetMemberId: string; candidate: unknown }
@@ -199,6 +234,9 @@ export type ServerRoomEvent =
   | { type: "room_error"; message: string }
   | { type: "voice_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
   | { type: "host_stream_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
+  | ({ type: "host_stream_playback_snapshot"; fromMemberId: string } & HostStreamPlaybackSnapshot)
+  | { type: "host_stream_quality_command"; fromMemberId: string; quality: HostStreamQuality }
+  | ({ type: "member_watch_progress_update"; fromMemberId: string } & MemberWatchProgressSnapshot)
   | ({ type: "host_control_command"; fromMemberId: string } & HostControlCommand)
   | { type: "room_closed"; reason: string }
   | { type: "client_ip"; ip: string };
