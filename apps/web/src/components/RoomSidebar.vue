@@ -5,6 +5,10 @@ import FileTree from "./FileTree.vue";
 import MemberVoicePanel from "./MemberVoicePanel.vue";
 import StreamPanel from "./StreamPanel.vue";
 import type { RoomState } from "@sync-seat/shared";
+type MemberProgressViewSnapshot = MemberWatchProgressSnapshot & {
+  serverTimeMs?: number;
+  receivedAtMs?: number;
+};
 
 defineProps<{
   activeSection: FunctionSection;
@@ -31,8 +35,8 @@ defineProps<{
   roomStreaming: boolean;
   members: RoomState["members"];
   currentMember: RoomState["members"][number] | undefined;
-  memberProgressById: Record<string, MemberWatchProgressSnapshot>;
-  serverClockLabel: string;
+  memberProgressById: Record<string, MemberProgressViewSnapshot>;
+  serverPlaybackTimeLabel: string;
 }>();
 
 const emit = defineEmits<{
@@ -71,7 +75,7 @@ const emit = defineEmits<{
           :owner-id="room?.ownerId ?? null"
           :is-owner="isOwner"
           :member-progress-by-id="memberProgressById"
-          :server-clock-label="serverClockLabel"
+          :server-playback-time-label="serverPlaybackTimeLabel"
           :voice-joined="voiceJoined"
           :voice-joining="voiceJoining"
           :muted="muted"

@@ -32,7 +32,7 @@ function mountPanel(isOwner: boolean) {
         owner: { positionSeconds: 65, durationSeconds: 300, playing: true, updatedAt: new Date().toISOString() },
         viewer: { positionSeconds: 125, durationSeconds: 300, playing: true, updatedAt: new Date().toISOString() }
       },
-      serverClockLabel: "20:54:12",
+      serverPlaybackTimeLabel: "20:54",
       voiceJoined: false,
       voiceJoining: false,
       muted: false,
@@ -44,10 +44,10 @@ function mountPanel(isOwner: boolean) {
 }
 
 describe("MemberVoicePanel", () => {
-  it("房主视角显示成员观看进度和服务器时间", () => {
+  it("房主视角显示成员观看进度和服务器播放时间", () => {
     const wrapper = mountPanel(true);
 
-    expect(wrapper.text()).toContain("服务器时间 20:54:12");
+    expect(wrapper.text()).toContain("服务器播放时间 20:54");
     expect(wrapper.text()).toContain("01:05");
     expect(wrapper.text()).toContain("02:05");
   });
@@ -55,7 +55,7 @@ describe("MemberVoicePanel", () => {
   it("非房主视角不显示成员观看进度", () => {
     const wrapper = mountPanel(false);
 
-    expect(wrapper.text()).toContain("服务器时间 20:54:12");
+    expect(wrapper.text()).toContain("服务器播放时间 20:54");
     expect(wrapper.text()).not.toContain("01:05");
     expect(wrapper.text()).not.toContain("02:05");
   });

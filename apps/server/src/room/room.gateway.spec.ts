@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { RoomGateway } from "./room.gateway.js";
 
 function createGateway() {
@@ -17,9 +17,14 @@ function createGateway() {
 }
 
 describe("RoomGateway host stream events", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("广播房主推流播放快照", async () => {
     const { gateway, to, emit } = createGateway();
-    const updatedAt = new Date().toISOString();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-14T12:00:00.000Z"));
 
     await gateway.roomEvent({
       type: "host_stream_playback_snapshot",
@@ -28,19 +33,19 @@ describe("RoomGateway host stream events", () => {
       durationSeconds: 120,
       positionSeconds: 30,
       playing: true,
-      playbackRate: 1,
-      updatedAt
+      playbackRate: 1
     });
 
     expect(to).toHaveBeenCalledWith("room:ABCD");
     expect(emit).toHaveBeenCalledWith("room_event", {
       type: "host_stream_playback_snapshot",
       fromMemberId: "owner",
+      serverTimeMs: new Date("2026-05-14T12:00:00.000Z").getTime(),
       durationSeconds: 120,
       positionSeconds: 30,
       playing: true,
       playbackRate: 1,
-      updatedAt
+      updatedAt: "2026-05-14T12:00:00.000Z"
     });
   });
 
@@ -65,7 +70,8 @@ describe("RoomGateway host stream events", () => {
 
   it("只把成员观看进度转发给房主", async () => {
     const { gateway, realtime, to, emit } = createGateway();
-    const updatedAt = new Date().toISOString();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-14T12:00:05.000Z"));
 
     await gateway.roomEvent({
       type: "member_watch_progress_report",
@@ -73,8 +79,7 @@ describe("RoomGateway host stream events", () => {
       memberId: "viewer-a",
       positionSeconds: 88,
       durationSeconds: 300,
-      playing: true,
-      updatedAt
+      playing: true
     });
 
     expect(realtime.targetSocketIds).toHaveBeenCalledWith("ABCD", "owner");
@@ -82,10 +87,11 @@ describe("RoomGateway host stream events", () => {
     expect(emit).toHaveBeenCalledWith("room_event", {
       type: "member_watch_progress_update",
       fromMemberId: "viewer-a",
+      serverTimeMs: new Date("2026-05-14T12:00:05.000Z").getTime(),
       positionSeconds: 88,
       durationSeconds: 300,
       playing: true,
-      updatedAt
+      updatedAt: "2026-05-14T12:00:05.000Z"
     });
   });
 });

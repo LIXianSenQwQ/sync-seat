@@ -25,6 +25,7 @@ const props = withDefaults(
     playbackState?: PlaybackState | null;
     playbackSyncClock?: PlaybackSyncClock | null;
     progressSnapshot?: HostStreamPlaybackSnapshot | null;
+    progressSnapshotClock?: PlaybackSyncClock | null;
     subtitleTrack?: SubtitleTrack | null;
     syncMode?: boolean;
     readonlyProgress?: boolean;
@@ -42,6 +43,7 @@ const props = withDefaults(
     playbackState: null,
     playbackSyncClock: null,
     progressSnapshot: null,
+    progressSnapshotClock: null,
     subtitleTrack: null,
     syncMode: false,
     readonlyProgress: false,
@@ -81,7 +83,7 @@ const controlsVisible = ref(true);
 const isNativeFullscreen = ref(false);
 const isPseudoFullscreen = ref(false);
 const remotePlayBlocked = ref(false);
-const snapshotNow = ref(Date.now());
+const snapshotNow = ref(performance.now());
 let wasPlayingBeforeDrag = false;
 let rafId = 0;
 let hideControlsTimer: number | null = null;
@@ -95,8 +97,12 @@ const snapshotPosition = computed(() => {
   const basePosition = Number.isFinite(snapshot.positionSeconds) ? snapshot.positionSeconds : 0;
   const durationSeconds = Number.isFinite(snapshot.durationSeconds) ? Math.max(0, snapshot.durationSeconds) : 0;
   if (!snapshot.playing) return durationSeconds ? Math.min(basePosition, durationSeconds) : Math.max(0, basePosition);
+  const clock = props.progressSnapshotClock;
   const updatedAtMs = Date.parse(snapshot.updatedAt);
-  const elapsedSeconds = Number.isFinite(updatedAtMs) ? Math.max(0, (snapshotNow.value - updatedAtMs) / 1000) : 0;
+  const elapsedMs = clock && Number.isFinite(updatedAtMs)
+    ? Math.max(0, clock.serverTimeMs - updatedAtMs + snapshotNow.value - clock.receivedAtMs)
+    : 0;
+  const elapsedSeconds = elapsedMs / 1000;
   const nextPosition = basePosition + elapsedSeconds * snapshot.playbackRate;
   return durationSeconds ? Math.min(nextPosition, durationSeconds) : Math.max(0, nextPosition);
 });
@@ -465,7 +471,7 @@ function handleFullscreenChange(): void {
 }
 
 function frame(): void {
-  snapshotNow.value = Date.now();
+  snapshotNow.value = performance.now();
   onRuntimeUpdate();
   rafId = window.requestAnimationFrame(frame);
 }

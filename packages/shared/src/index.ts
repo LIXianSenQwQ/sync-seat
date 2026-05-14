@@ -147,6 +147,13 @@ export interface MemberWatchProgressSnapshot {
 }
 
 /**
+ * 客户端上报的播放进度，不携带客户端墙钟时间。
+ *
+ * @author 清羽
+ */
+export type ClientProgressSnapshot = Omit<MemberWatchProgressSnapshot, "updatedAt">;
+
+/**
  * 前端可见的完整房间状态。
  *
  * @author 清羽
@@ -221,9 +228,9 @@ export type ClientRoomEvent =
   | { type: "voice_ice_candidate"; roomCode: string; memberId: string; targetMemberId: string; candidate: unknown }
   | { type: "host_stream_start"; roomCode: string; memberId: string; fileName: string }
   | { type: "host_stream_stop"; roomCode: string; memberId: string }
-  | ({ type: "host_stream_playback_snapshot"; roomCode: string; memberId: string } & HostStreamPlaybackSnapshot)
+  | ({ type: "host_stream_playback_snapshot"; roomCode: string; memberId: string } & Omit<HostStreamPlaybackSnapshot, "updatedAt">)
   | { type: "host_stream_quality_request"; roomCode: string; memberId: string; quality: HostStreamQuality }
-  | ({ type: "member_watch_progress_report"; roomCode: string; memberId: string } & MemberWatchProgressSnapshot)
+  | ({ type: "member_watch_progress_report"; roomCode: string; memberId: string } & ClientProgressSnapshot)
   | { type: "host_stream_offer"; roomCode: string; memberId: string; targetMemberId: string; description: unknown }
   | { type: "host_stream_answer"; roomCode: string; memberId: string; targetMemberId: string; description: unknown }
   | { type: "host_stream_ice_candidate"; roomCode: string; memberId: string; targetMemberId: string; candidate: unknown }
@@ -234,9 +241,9 @@ export type ServerRoomEvent =
   | { type: "room_error"; message: string }
   | { type: "voice_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
   | { type: "host_stream_signal"; fromMemberId: string; signalType: "offer" | "answer" | "ice_candidate"; payload: unknown }
-  | ({ type: "host_stream_playback_snapshot"; fromMemberId: string } & HostStreamPlaybackSnapshot)
+  | ({ type: "host_stream_playback_snapshot"; fromMemberId: string; serverTimeMs: number } & HostStreamPlaybackSnapshot)
   | { type: "host_stream_quality_command"; fromMemberId: string; quality: HostStreamQuality }
-  | ({ type: "member_watch_progress_update"; fromMemberId: string } & MemberWatchProgressSnapshot)
+  | ({ type: "member_watch_progress_update"; fromMemberId: string; serverTimeMs: number } & MemberWatchProgressSnapshot)
   | ({ type: "host_control_command"; fromMemberId: string } & HostControlCommand)
   | { type: "room_closed"; reason: string }
   | { type: "client_ip"; ip: string };

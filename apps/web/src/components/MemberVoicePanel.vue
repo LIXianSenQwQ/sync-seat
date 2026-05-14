@@ -3,12 +3,17 @@ import type { MemberWatchProgressSnapshot, RoomState } from "@sync-seat/shared";
 import { IconCrown, IconPhone, IconPhoneOff, IconMicrophone, IconMicrophoneOff } from "@tabler/icons-vue";
 import { onBeforeUnmount, onMounted, ref } from "vue";
 
+type MemberProgressViewSnapshot = MemberWatchProgressSnapshot & {
+  serverTimeMs?: number;
+  receivedAtMs?: number;
+};
+
 const props = defineProps<{
   members: RoomState["members"];
   ownerId: string | null;
   isOwner: boolean;
-  memberProgressById: Record<string, MemberWatchProgressSnapshot>;
-  serverClockLabel: string;
+  memberProgressById: Record<string, MemberProgressViewSnapshot>;
+  serverPlaybackTimeLabel: string;
   voiceJoined: boolean;
   voiceJoining: boolean;
   muted: boolean;
@@ -24,7 +29,7 @@ const emit = defineEmits<{
   "update:volume": [value: number];
 }>();
 
-const nowMs = ref(Date.now());
+const nowMs = ref(performance.now());
 let nowTimer: number | null = null;
 
 function formatTime(value: number): string {
@@ -42,13 +47,17 @@ function formatTime(value: number): string {
 function progressLabel(memberId: string): string {
   const snapshot = props.memberProgressById[memberId];
   if (!snapshot) return "--:--";
-  if (nowMs.value - Date.parse(snapshot.updatedAt) > 5000) return "--:--";
+  const updatedAtMs = Date.parse(snapshot.updatedAt);
+  const ageMs = typeof snapshot.serverTimeMs === "number" && typeof snapshot.receivedAtMs === "number"
+    ? snapshot.serverTimeMs + nowMs.value - snapshot.receivedAtMs - updatedAtMs
+    : Date.now() - updatedAtMs;
+  if (ageMs > 5000) return "--:--";
   return formatTime(snapshot.positionSeconds);
 }
 
 onMounted(() => {
   nowTimer = window.setInterval(() => {
-    nowMs.value = Date.now();
+    nowMs.value = performance.now();
   }, 1000);
 });
 
@@ -119,8 +128,8 @@ onBeforeUnmount(() => {
 
     <!-- 成员列表 -->
     <div>
-      <p v-if="serverClockLabel" class="text-caption text-text-muted mb-1">
-        服务器时间 {{ serverClockLabel }}
+      <p v-if="serverPlaybackTimeLabel" class="text-caption text-text-muted mb-1">
+        服务器播放时间 {{ serverPlaybackTimeLabel }}
       </p>
       <p class="text-eyebrow text-text-muted mb-2">房间成员 · {{ members.length }}/3</p>
       <div class="flex flex-col gap-1">

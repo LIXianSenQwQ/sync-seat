@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { PLAYBACK_RATE_OPTIONS, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type HostStreamPlaybackSnapshot, type HostStreamQuality, type MemberWatchProgressSnapshot, type RoomState } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type ClientProgressSnapshot, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type HostStreamPlaybackSnapshot, type HostStreamQuality, type MemberWatchProgressSnapshot, type RoomState } from "@sync-seat/shared";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import CustomVideoPlayer from "../components/CustomVideoPlayer.vue";
@@ -12,8 +12,14 @@ import { HostStreamMesh } from "../services/host-stream";
 import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { useIdentityStore } from "../stores/identity";
 import { RoomSocket, type RoomStateSyncClock } from "../services/realtime";
+import { targetPosition } from "../services/playback-sync";
 import { resolveVoiceTurnIceServers, VoiceMesh } from "../services/voice";
 import type { FunctionSection } from "../components/FunctionNav.vue";
+
+type MemberProgressViewSnapshot = MemberWatchProgressSnapshot & {
+  serverTimeMs?: number;
+  receivedAtMs?: number;
+};
 
 const route = useRoute();
 const router = useRouter();
@@ -45,7 +51,8 @@ const localVideoName = ref("");
 const remoteMediaStream = ref<MediaStream | null>(null);
 const remoteStreamReady = ref(false);
 const hostStreamPlaybackSnapshot = ref<HostStreamPlaybackSnapshot | null>(null);
-const memberProgressById = ref<Record<string, MemberWatchProgressSnapshot>>({});
+const hostStreamPlaybackClock = ref<RoomStateSyncClock | null>(null);
+const memberProgressById = ref<Record<string, MemberProgressViewSnapshot>>({});
 const hostStreamIceState = ref<Record<string, RTCIceConnectionState>>({});
 const hostStreamDiagnostics = ref<Record<string, HostStreamIceDiagnostics>>({});
 const voiceIceState = ref<Record<string, RTCIceConnectionState>>({});
@@ -59,7 +66,7 @@ let hostPlaybackSnapshotVideo: HTMLVideoElement | null = null;
 let hostPlaybackSnapshotAbortController: AbortController | null = null;
 let lastHostPlaybackSnapshotSentAt = 0;
 let watchProgressTimer: number | null = null;
-let serverClockTimer: number | null = null;
+let playbackTimeTimer: number | null = null;
 const clockNowMs = ref(0);
 
 const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
@@ -103,11 +110,15 @@ const topBarTitle = computed(() => {
   if (isHostStreamMode.value) return room.value?.hostStreamState?.fileName || "房主推流";
   return room.value?.currentVideo?.fileName || "等待选片";
 });
-const serverClockLabel = computed(() => {
-  const clock = playbackSyncClock.value;
-  if (!clock || !clockNowMs.value) return "";
-  const serverNow = clock.serverTimeMs + clockNowMs.value - clock.receivedAtMs;
-  return new Date(serverNow).toLocaleTimeString("zh-CN", { hour12: false });
+const serverPlaybackTimeLabel = computed(() => {
+  if (!clockNowMs.value) return "";
+  if (isDirectMode.value && room.value?.currentVideo) {
+    return formatPlaybackTime(targetPosition(room.value.playbackState, directPlaybackSyncClock.value, clockNowMs.value));
+  }
+  if (isHostStreamMode.value && hostStreamPlaybackSnapshot.value) {
+    return formatPlaybackTime(resolveHostStreamSnapshotPosition(hostStreamPlaybackSnapshot.value));
+  }
+  return "--:--";
 });
 // === 房间操作 ===
 async function join(): Promise<void> {
@@ -177,6 +188,10 @@ function connectSocket(): void {
         playbackRate: event.playbackRate,
         updatedAt: event.updatedAt
       };
+      hostStreamPlaybackClock.value = {
+        serverTimeMs: event.serverTimeMs,
+        receivedAtMs: performance.now()
+      };
     },
     (event) => { void hostStream.value?.setMemberQuality(event.fromMemberId, event.quality); },
     (event) => {
@@ -186,7 +201,9 @@ function connectSocket(): void {
           positionSeconds: event.positionSeconds,
           durationSeconds: event.durationSeconds,
           playing: event.playing,
-          updatedAt: event.updatedAt
+          updatedAt: event.updatedAt,
+          serverTimeMs: event.serverTimeMs,
+          receivedAtMs: performance.now()
         }
       };
     },
@@ -197,7 +214,7 @@ function connectSocket(): void {
       voice.value?.leave(); voice.value = null;
       voiceJoined.value = false; voiceRelayError.value = ""; voiceIceState.value = {};
       hostStream.value?.stop(); remoteMediaStream.value = null;
-      remoteStreamReady.value = false; hostStreamPlaybackSnapshot.value = null; memberProgressById.value = {}; hostStreamDiagnostics.value = {}; hostStreamIceState.value = {};
+      remoteStreamReady.value = false; hostStreamPlaybackSnapshot.value = null; hostStreamPlaybackClock.value = null; memberProgressById.value = {}; hostStreamDiagnostics.value = {}; hostStreamIceState.value = {};
     },
     (message) => { error.value = message; }
   );
@@ -230,6 +247,29 @@ function createOperationId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function formatPlaybackTime(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return "--:--";
+  const total = Math.floor(value);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function resolveHostStreamSnapshotPosition(snapshot: HostStreamPlaybackSnapshot): number {
+  const durationSeconds = Number.isFinite(snapshot.durationSeconds) ? Math.max(0, snapshot.durationSeconds) : 0;
+  const updatedAtMs = Date.parse(snapshot.updatedAt);
+  const clock = hostStreamPlaybackClock.value;
+  const elapsedSeconds = snapshot.playing && clock && Number.isFinite(updatedAtMs)
+    ? Math.max(0, clock.serverTimeMs - updatedAtMs + performance.now() - clock.receivedAtMs) / 1000 * snapshot.playbackRate
+    : 0;
+  const estimatedPosition = snapshot.positionSeconds + elapsedSeconds;
+  return durationSeconds ? Math.min(estimatedPosition, durationSeconds) : Math.max(0, estimatedPosition);
+}
+
 function handleDirectPlaybackIntent(intent: {
   action: "play" | "pause" | "seek" | "playback_rate_change" | "buffer_pause";
   positionSeconds: number; playing: boolean; playbackRate: number; baseVersion: number;
@@ -250,24 +290,19 @@ function currentLocalWatchVideo(): HTMLVideoElement | null {
   return null;
 }
 
-function resolveHostStreamViewerProgress(video: HTMLVideoElement | null): MemberWatchProgressSnapshot | null {
+function resolveHostStreamViewerProgress(video: HTMLVideoElement | null): ClientProgressSnapshot | null {
   const snapshot = hostStreamPlaybackSnapshot.value;
   if (!snapshot) return null;
   const durationSeconds = Number.isFinite(snapshot.durationSeconds) ? Math.max(0, snapshot.durationSeconds) : 0;
-  const updatedAtMs = Date.parse(snapshot.updatedAt);
-  const elapsedSeconds = snapshot.playing && Number.isFinite(updatedAtMs)
-    ? Math.max(0, (Date.now() - updatedAtMs) / 1000) * snapshot.playbackRate
-    : 0;
-  const estimatedPosition = snapshot.positionSeconds + elapsedSeconds;
+  const estimatedPosition = resolveHostStreamSnapshotPosition(snapshot);
   return {
     positionSeconds: durationSeconds ? Math.min(estimatedPosition, durationSeconds) : Math.max(0, estimatedPosition),
     durationSeconds,
-    playing: Boolean(video && !video.paused && snapshot.playing),
-    updatedAt: new Date().toISOString()
+    playing: Boolean(video && !video.paused && snapshot.playing)
   };
 }
 
-function resolveMemberWatchProgress(): MemberWatchProgressSnapshot | null {
+function resolveMemberWatchProgress(): ClientProgressSnapshot | null {
   const video = currentLocalWatchVideo();
   if (isHostStreamMode.value && !isOwner.value) {
     return resolveHostStreamViewerProgress(video);
@@ -276,8 +311,7 @@ function resolveMemberWatchProgress(): MemberWatchProgressSnapshot | null {
   return {
     positionSeconds: Number.isFinite(video.currentTime) ? video.currentTime : 0,
     durationSeconds: Number.isFinite(video.duration) ? video.duration : 0,
-    playing: !video.paused,
-    updatedAt: new Date().toISOString()
+    playing: !video.paused
   };
 }
 
@@ -289,12 +323,7 @@ function sendMemberWatchProgress(force = false): void {
   const nextProgress = {
     positionSeconds: snapshot.positionSeconds,
     durationSeconds: snapshot.durationSeconds,
-    playing: snapshot.playing,
-    updatedAt: snapshot.updatedAt
-  };
-  memberProgressById.value = {
-    ...memberProgressById.value,
-    [identity.memberId]: nextProgress
+    playing: snapshot.playing
   };
   send({
     type: "member_watch_progress_report",
@@ -341,6 +370,7 @@ function selectLocalVideo(event: Event): void {
   localVideoName.value = file.name;
   localVideoUrl.value = URL.createObjectURL(file);
   hostStreamPlaybackSnapshot.value = null;
+  hostStreamPlaybackClock.value = null;
 }
 
 async function startHostStream(): Promise<void> {
@@ -369,6 +399,7 @@ function stopHostStream(): void {
   hostStream.value?.stop(); hostStream.value = null; hostStreamPromise = null;
   remoteMediaStream.value = null; remoteStreamReady.value = false;
   hostStreamPlaybackSnapshot.value = null;
+  hostStreamPlaybackClock.value = null;
   hostStreamDiagnostics.value = {}; hostStreamIceState.value = {};
   send({ type: "host_stream_stop", roomCode: roomCode.value, memberId: identity.memberId });
 }
@@ -409,8 +440,7 @@ function sendHostStreamPlaybackSnapshot(force = false): void {
     durationSeconds: Number.isFinite(video.duration) ? video.duration : 0,
     positionSeconds: Number.isFinite(video.currentTime) ? video.currentTime : 0,
     playing: !video.paused,
-    playbackRate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1,
-    updatedAt: new Date().toISOString()
+    playbackRate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1
   });
   sendMemberWatchProgress(force);
 }
@@ -516,18 +546,19 @@ onMounted(async () => {
   roomRefreshTimer = window.setInterval(() => { void refreshRoomState(); }, 5000);
   watchProgressTimer = window.setInterval(() => { sendMemberWatchProgress(false); }, 1000);
   clockNowMs.value = performance.now();
-  serverClockTimer = window.setInterval(() => { clockNowMs.value = performance.now(); }, 1000);
+  playbackTimeTimer = window.setInterval(() => { clockNowMs.value = performance.now(); }, 1000);
 });
 
 onBeforeUnmount(() => {
   if (roomRefreshTimer) window.clearInterval(roomRefreshTimer);
   if (watchProgressTimer) window.clearInterval(watchProgressTimer);
-  if (serverClockTimer) window.clearInterval(serverClockTimer);
+  if (playbackTimeTimer) window.clearInterval(playbackTimeTimer);
   unbindHostPlaybackSnapshotEvents();
   socket.close();
   voice.value?.leave(); voiceRelayError.value = ""; voiceIceState.value = {};
   hostStream.value?.stop(); hostStream.value = null; hostStreamPromise = null;
   remoteMediaStream.value = null; remoteStreamReady.value = false;
+  hostStreamPlaybackSnapshot.value = null; hostStreamPlaybackClock.value = null;
   hostStreamDiagnostics.value = {}; hostStreamIceState.value = {};
   if (localVideoUrl.value) URL.revokeObjectURL(localVideoUrl.value);
 });
@@ -607,6 +638,7 @@ onBeforeUnmount(() => {
               readonly-progress
               control-mode="request-host"
               :progress-snapshot="hostStreamPlaybackSnapshot"
+              :progress-snapshot-clock="hostStreamPlaybackClock"
               :show-playback-rates="false"
               :show-step-buttons="false"
               @request-host-control="requestHostControl"
@@ -649,7 +681,7 @@ onBeforeUnmount(() => {
           :members="members"
           :current-member="currentMember"
           :member-progress-by-id="memberProgressById"
-          :server-clock-label="serverClockLabel"
+          :server-playback-time-label="serverPlaybackTimeLabel"
           @select-section="activeSection = $event; showMobileDrawer = false"
           @navigate="loadDirectory"
           @load-video="loadVideo"

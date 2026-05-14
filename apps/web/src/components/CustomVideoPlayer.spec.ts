@@ -36,6 +36,7 @@ function prepareProgress(element: Element): void {
 describe("CustomVideoPlayer", () => {
   afterEach(() => {
     document.body.className = "";
+    vi.restoreAllMocks();
   });
 
   it("拖动中只更新控件 UI，不改 video.currentTime 且不发送同步事件", async () => {
@@ -218,6 +219,49 @@ describe("CustomVideoPlayer", () => {
 
     expect(wrapper.find(".player-time").text()).toBe("00:30 / 02:00");
     expect((wrapper.find(".player-progress-played").element as HTMLElement).style.width).toBe("25%");
+  });
+
+  it("推流快照带服务端时钟时使用单调时钟推进进度", () => {
+    vi.spyOn(performance, "now").mockReturnValue(1100);
+    const updatedAt = "2026-05-14T12:00:00.000Z";
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "",
+        progressSnapshot: {
+          durationSeconds: 100,
+          positionSeconds: 30,
+          playing: true,
+          playbackRate: 1,
+          updatedAt
+        },
+        progressSnapshotClock: {
+          serverTimeMs: Date.parse(updatedAt) + 1000,
+          receivedAtMs: 100
+        }
+      }
+    });
+
+    expect(wrapper.find(".player-time").text()).toBe("00:32 / 01:40");
+    expect((wrapper.find(".player-progress-played").element as HTMLElement).style.width).toBe("32%");
+  });
+
+  it("推流快照没有服务端时钟时不使用浏览器墙钟推进", () => {
+    vi.spyOn(performance, "now").mockReturnValue(10_000);
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "",
+        progressSnapshot: {
+          durationSeconds: 100,
+          positionSeconds: 30,
+          playing: true,
+          playbackRate: 1,
+          updatedAt: "2026-05-14T12:00:00.000Z"
+        }
+      }
+    });
+
+    expect(wrapper.find(".player-time").text()).toBe("00:30 / 01:40");
+    expect((wrapper.find(".player-progress-played").element as HTMLElement).style.width).toBe("30%");
   });
 
   it("只读进度条不会拖动底层 video，也不会发送同步事件", async () => {

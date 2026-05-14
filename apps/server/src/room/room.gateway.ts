@@ -153,14 +153,16 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.emitRoomError(roomCode, event.memberId, "只有房主可以同步推流播放进度");
         return;
       }
+      const serverTimeMs = Date.now();
       this.server.to(roomName).emit("room_event", {
         type: "host_stream_playback_snapshot",
         fromMemberId: event.memberId,
+        serverTimeMs,
         durationSeconds: event.durationSeconds,
         positionSeconds: event.positionSeconds,
         playing: event.playing,
         playbackRate: event.playbackRate,
-        updatedAt: event.updatedAt
+        updatedAt: new Date(serverTimeMs).toISOString()
       });
       return;
     }
@@ -181,13 +183,15 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     if (event.type === "member_watch_progress_report") {
+      const serverTimeMs = Date.now();
       const progress = {
         type: "member_watch_progress_update",
         fromMemberId: event.memberId,
+        serverTimeMs,
         positionSeconds: event.positionSeconds,
         durationSeconds: event.durationSeconds,
         playing: event.playing,
-        updatedAt: event.updatedAt
+        updatedAt: new Date(serverTimeMs).toISOString()
       };
       for (const socketId of this.realtime.targetSocketIds(roomCode, this.rooms.getOwnerId(roomCode))) {
         this.server.to(socketId).emit("room_event", progress);
