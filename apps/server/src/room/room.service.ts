@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException, OnModuleDestroy, OnModuleInit, ServiceUnavailableException } from "@nestjs/common";
 import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { PLAYBACK_RATE_OPTIONS, type CurrentSubtitle, type HostStreamState, type PlaybackState, type RoomState, type WatchMode } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type CurrentSubtitle, type HostStreamState, type PlaybackAction, type PlaybackState, type RoomState, type WatchMode } from "@sync-seat/shared";
 import { AlistService } from "../drive/alist.service.js";
 import { SubtitleService } from "../drive/subtitle.service.js";
 import { logInfo, logWarn } from "../logging/app-logger.js";
@@ -281,11 +281,7 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       playUrl
     };
     room.currentSubtitle = null;
-    room.playbackState = this.nextPlaybackState(room, {
-      playing: false,
-      positionSeconds: 0,
-      playbackRate: 1
-    });
+    room.playbackState = this.resetPlaybackState(room);
     this.touch(room);
     logInfo("RoomService", "房间加载视频", {
       roomCode: room.roomCode,
@@ -323,16 +319,24 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
    * @param patch 播放状态变更。
    * @returns 更新后的房间状态。
    */
-  updatePlayback(roomCode: string, patch: Pick<PlaybackState, "positionSeconds"> & Partial<Pick<PlaybackState, "playing" | "playbackRate">>): RoomState {
+  updatePlayback(
+    roomCode: string,
+    patch: Pick<PlaybackState, "positionSeconds" | "playing" | "playbackRate">,
+    operation: { operationId: string; memberId: string; action: PlaybackAction; baseVersion: number }
+  ): RoomState {
     const room = this.getStoredRoom(roomCode);
     this.assertDirectMode(room);
-    if (patch.playbackRate !== undefined && !this.isAllowedPlaybackRate(patch.playbackRate)) {
+    if (!this.isAllowedPlaybackRate(patch.playbackRate)) {
       throw new BadRequestException(`只支持 ${PLAYBACK_RATE_OPTIONS.map((rate) => `${rate}x`).join("、")} 倍速`);
     }
-    room.playbackState = this.nextPlaybackState(room, patch);
+    room.playbackState = this.nextPlaybackState(room, patch, operation);
     this.touch(room);
     logInfo("RoomService", "房间播放状态变更", {
       roomCode: room.roomCode,
+      operationId: operation.operationId,
+      memberId: operation.memberId,
+      action: operation.action,
+      baseVersion: operation.baseVersion,
       playing: room.playbackState.playing,
       positionSeconds: room.playbackState.positionSeconds,
       playbackRate: room.playbackState.playbackRate,
@@ -489,7 +493,10 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       positionSeconds: 0,
       playbackRate: 1,
       stateUpdatedAt: now,
-      version: 0
+      version: 0,
+      lastOperationId: null,
+      lastMemberId: null,
+      lastAction: null
     };
   }
 
@@ -504,13 +511,33 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private nextPlaybackState(room: StoredRoom, patch: Pick<PlaybackState, "positionSeconds"> & Partial<Pick<PlaybackState, "playing" | "playbackRate">>): PlaybackState {
+  private resetPlaybackState(room: StoredRoom): PlaybackState {
     return {
-      playing: patch.playing ?? room.playbackState.playing,
-      positionSeconds: Math.max(0, patch.positionSeconds),
-      playbackRate: patch.playbackRate ?? room.playbackState.playbackRate,
+      playing: false,
+      positionSeconds: 0,
+      playbackRate: 1,
       stateUpdatedAt: new Date().toISOString(),
-      version: room.playbackState.version + 1
+      version: room.playbackState.version + 1,
+      lastOperationId: null,
+      lastMemberId: null,
+      lastAction: null
+    };
+  }
+
+  private nextPlaybackState(
+    room: StoredRoom,
+    patch: Pick<PlaybackState, "positionSeconds" | "playing" | "playbackRate">,
+    operation: { operationId: string; memberId: string; action: PlaybackAction }
+  ): PlaybackState {
+    return {
+      playing: patch.playing,
+      positionSeconds: Math.max(0, patch.positionSeconds),
+      playbackRate: patch.playbackRate,
+      stateUpdatedAt: new Date().toISOString(),
+      version: room.playbackState.version + 1,
+      lastOperationId: operation.operationId,
+      lastMemberId: operation.memberId,
+      lastAction: operation.action
     };
   }
 

@@ -2,11 +2,11 @@
 import { PLAYBACK_RATE_OPTIONS, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type RoomState } from "@sync-seat/shared";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import CustomVideoPlayer from "../components/CustomVideoPlayer.vue";
 import { api } from "../services/api";
 import { HostStreamMesh, type HostStreamQuality } from "../services/host-stream";
 import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../services/ice-diagnostics";
 import { getIdentity } from "../services/identity";
-import { applyPlaybackState, targetPosition } from "../services/playback-sync";
 import { RoomSocket } from "../services/realtime";
 import { VoiceMesh } from "../services/voice";
 
@@ -17,9 +17,8 @@ const identity = getIdentity();
 const password = ref("");
 const room = ref<RoomState | null>(null);
 const error = ref("");
-const videoRef = ref<HTMLVideoElement | null>(null);
-const hostVideoRef = ref<HTMLVideoElement | null>(null);
-const remoteStreamVideoRef = ref<HTMLVideoElement | null>(null);
+const directPlayerRef = ref<InstanceType<typeof CustomVideoPlayer> | null>(null);
+const hostPlayerRef = ref<InstanceType<typeof CustomVideoPlayer> | null>(null);
 const entries = ref<DriveEntry[]>([]);
 const subtitles = ref<DriveEntry[]>([]);
 const currentPath = ref("/");
@@ -29,36 +28,21 @@ const voice = ref<VoiceMesh | null>(null);
 const voiceJoined = ref(false);
 const muted = ref(false);
 const volume = ref(1);
-const localSeeking = ref(false);
 const hostStream = shallowRef<HostStreamMesh | null>(null);
-const remotePlayBlocked = ref(false);
 /** 防止 ensureHostStream 并发调用时创建多个 HostStreamMesh 实例 */
 let hostStreamPromise: Promise<HostStreamMesh> | null = null;
 /** 服务端返回的客户端真实局域网 IP，用于修复 Chrome mDNS 隐藏 */
 let clientIp = "";
 let clientIpPromise: Promise<string> | null = null;
-let pauseSendTimer: number | null = null;
-let localPlaybackGuardUntil = 0;
-let wasPlayingBeforeSeek = false;
-let pendingLocalSeekTarget: number | null = null;
-let localSeekRetryCount = 0;
-let suppressNextPlayEvent = false;
-let suppressRemotePlayEvent = false;
-let suppressRemotePauseEvent = false;
-let suppressRemoteRateEventUntil = 0;
-let suppressRemoteSeekEvent = false;
-let remoteSeekInProgress = false;
-let remoteSeekTarget: number | null = null;
-let lastAppliedPlaybackVersion = -1;
 const localVideoUrl = ref("");
 const localVideoName = ref("");
+const remoteMediaStream = ref<MediaStream | null>(null);
 const remoteStreamReady = ref(false);
 const hostStreamIceState = ref<Record<string, RTCIceConnectionState>>({});
 const hostStreamDiagnostics = ref<Record<string, HostStreamIceDiagnostics>>({});
 const voiceIceState = ref<Record<string, RTCIceConnectionState>>({});
 const hostStreamQuality = ref<HostStreamQuality>("original");
 const voiceJoining = ref(false);
-let calibrationTimer: number | null = null;
 let roomRefreshTimer: number | null = null;
 
 const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
@@ -66,7 +50,6 @@ const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = 
   { label: "标准", value: "standard" },
   { label: "流畅", value: "smooth" }
 ];
-const playbackRateOptions = PLAYBACK_RATE_OPTIONS.map((value) => ({ label: `${value}x`, value }));
 const members = computed(() => room.value?.members ?? []);
 const currentMember = computed(() => members.value.find((member) => member.memberId === identity.memberId));
 const isOwner = computed(() => room.value?.ownerId === identity.memberId);
@@ -131,10 +114,6 @@ function connectSocket(): void {
       room.value = nextRoom;
       connected.value = true;
       await nextTick();
-      if (nextRoom.watchMode === "direct" && videoRef.value && nextRoom.playbackState.version > lastAppliedPlaybackVersion) {
-        lastAppliedPlaybackVersion = nextRoom.playbackState.version;
-        applyRemotePlaybackState(videoRef.value, nextRoom.playbackState);
-      }
       if (nextRoom.currentVideo) {
         subtitles.value = await api.listSubtitles(nextRoom.currentVideo.filePath).catch(() => []);
       }
@@ -158,6 +137,8 @@ function connectSocket(): void {
       error.value = reason;
       room.value = null;
       hostStream.value?.stop();
+      remoteMediaStream.value = null;
+      remoteStreamReady.value = false;
       hostStreamDiagnostics.value = {};
       hostStreamIceState.value = {};
     },
@@ -185,69 +166,6 @@ function send(event: ClientRoomEvent): void {
   socket.send(event);
 }
 
-function guardLocalPlayback(durationMs = 1800): void {
-  localPlaybackGuardUntil = Date.now() + durationMs;
-}
-
-function isAutoplayBlocked(err: unknown): boolean {
-  return err instanceof DOMException && err.name === "NotAllowedError";
-}
-
-function applyRemotePlaybackState(video: HTMLVideoElement, playbackState: RoomState["playbackState"]): void {
-  if (!playbackState.playing) {
-    remotePlayBlocked.value = false;
-  }
-  const target = targetPosition(playbackState);
-  if (!playbackState.playing || Math.abs(target - video.currentTime) > 2) {
-    remoteSeekTarget = target;
-    suppressRemoteSeekEvent = true;
-  }
-  suppressRemoteRateEventUntil = Date.now() + 1200;
-  suppressRemotePlayEvent = playbackState.playing && video.paused;
-  suppressRemotePauseEvent = !playbackState.playing && !video.paused;
-  void applyPlaybackState(video, playbackState)
-    .then(() => {
-      if (playbackState.playing) {
-        remotePlayBlocked.value = false;
-      }
-    })
-    .catch((err) => {
-      // 步骤1：浏览器会拦截非用户手势触发的有声视频播放，此时提示用户点一次继续同步。
-      if (playbackState.playing && isAutoplayBlocked(err)) {
-        remotePlayBlocked.value = true;
-        return;
-      }
-      console.warn("[PlaybackSync] 应用远端播放状态失败:", err);
-    });
-  window.setTimeout(() => {
-    suppressRemotePlayEvent = false;
-    suppressRemotePauseEvent = false;
-    suppressRemoteSeekEvent = false;
-    remoteSeekInProgress = false;
-    remoteSeekTarget = null;
-  }, 1200);
-}
-
-function resumeRemotePlayback(): void {
-  if (!videoRef.value || !room.value) return;
-  remotePlayBlocked.value = false;
-  applyRemotePlaybackState(videoRef.value, room.value.playbackState);
-}
-
-function clearPendingPause(): void {
-  if (pauseSendTimer) {
-    window.clearTimeout(pauseSendTimer);
-    pauseSendTimer = null;
-  }
-}
-
-function normalizedSeekTarget(video: HTMLVideoElement, positionSeconds: number): number {
-  if (Number.isFinite(video.duration)) {
-    return Math.min(Math.max(0, positionSeconds), video.duration);
-  }
-  return Math.max(0, positionSeconds);
-}
-
 function loadVideo(path: string): void {
   send({ type: "load_video", roomCode: roomCode.value, memberId: identity.memberId, filePath: path });
 }
@@ -256,144 +174,27 @@ function selectSubtitle(path: string | null): void {
   send({ type: "select_subtitle", roomCode: roomCode.value, memberId: identity.memberId, filePath: path });
 }
 
-function formatPlaybackRate(playbackRate: number): string {
-  return `${playbackRate}x`;
+function createOperationId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function isAllowedPlaybackRate(playbackRate: number): boolean {
-  return PLAYBACK_RATE_OPTIONS.some((rate) => Math.abs(rate - playbackRate) < 0.001);
-}
-
-function changePlaybackRate(playbackRate: number): void {
-  if (!videoRef.value || !isAllowedPlaybackRate(playbackRate)) return;
-  guardLocalPlayback();
+function handleDirectPlaybackIntent(intent: {
+  action: "play" | "pause" | "seek" | "playback_rate_change" | "buffer_pause";
+  positionSeconds: number;
+  playing: boolean;
+  playbackRate: number;
+  baseVersion: number;
+}): void {
   send({
-    type: "playback_rate_change",
+    type: "set_playback",
     roomCode: roomCode.value,
     memberId: identity.memberId,
-    playbackRate,
-    positionSeconds: videoRef.value.currentTime
-  });
-}
-
-function onPlay(): void {
-  if (!videoRef.value) return;
-  if (suppressRemotePlayEvent) {
-    suppressRemotePlayEvent = false;
-    return;
-  }
-  remotePlayBlocked.value = false;
-  if (suppressNextPlayEvent) {
-    suppressNextPlayEvent = false;
-    return;
-  }
-  clearPendingPause();
-  guardLocalPlayback();
-  if (room.value?.playbackState.playing) {
-    applyRemotePlaybackState(videoRef.value, room.value.playbackState);
-    return;
-  }
-  send({ type: "play", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
-}
-
-function onPause(): void {
-  if (!videoRef.value) return;
-  if (suppressRemotePauseEvent) {
-    suppressRemotePauseEvent = false;
-    return;
-  }
-  remotePlayBlocked.value = false;
-  if (localSeeking.value || videoRef.value.seeking) return;
-  guardLocalPlayback();
-  clearPendingPause();
-  pauseSendTimer = window.setTimeout(() => {
-    pauseSendTimer = null;
-    if (!videoRef.value || localSeeking.value || videoRef.value.seeking || !videoRef.value.paused) return;
-    send({ type: "pause", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds: videoRef.value.currentTime });
-  }, 180);
-}
-
-function onSeeking(): void {
-  if (!videoRef.value) return;
-  if (suppressRemoteSeekEvent && remoteSeekTarget !== null && Math.abs(videoRef.value.currentTime - remoteSeekTarget) < 0.75) {
-    suppressRemoteSeekEvent = false;
-    remoteSeekInProgress = true;
-    return;
-  }
-  clearPendingPause();
-  // 步骤1：记录拖动前的播放意图，避免原生控件 seek 时的临时暂停污染房间状态。
-  wasPlayingBeforeSeek = !videoRef.value.paused || (room.value?.playbackState.playing ?? false);
-  localSeeking.value = true;
-  const serverTarget = room.value ? targetPosition(room.value.playbackState) : null;
-  const currentTarget = normalizedSeekTarget(videoRef.value, videoRef.value.currentTime);
-  // 步骤2：记录用户真正拖到的目标点。未缓冲分片可能让原生控件短暂弹回旧位置，不能让弹回值覆盖目标点。
-  if (
-    pendingLocalSeekTarget === null ||
-    serverTarget === null ||
-    Math.abs(currentTarget - serverTarget) >= 0.75 ||
-    Math.abs(pendingLocalSeekTarget - serverTarget) < 0.75
-  ) {
-    pendingLocalSeekTarget = currentTarget;
-    localSeekRetryCount = 0;
-  }
-  guardLocalPlayback(2500);
-}
-
-function onSeeked(): void {
-  if (!videoRef.value) return;
-  if (remoteSeekInProgress && remoteSeekTarget !== null && Math.abs(videoRef.value.currentTime - remoteSeekTarget) < 0.75) {
-    remoteSeekInProgress = false;
-    remoteSeekTarget = null;
-    localSeeking.value = false;
-    wasPlayingBeforeSeek = false;
-    pendingLocalSeekTarget = null;
-    localSeekRetryCount = 0;
-    return;
-  }
-
-  const targetSeconds = pendingLocalSeekTarget;
-  if (targetSeconds !== null && Math.abs(videoRef.value.currentTime - targetSeconds) >= 0.75 && localSeekRetryCount < 2) {
-    localSeekRetryCount += 1;
-    guardLocalPlayback(3500);
-    videoRef.value.currentTime = targetSeconds;
-    return;
-  }
-
-  const positionSeconds = targetSeconds ?? videoRef.value.currentTime;
-  const shouldResume = wasPlayingBeforeSeek;
-  localSeeking.value = false;
-  wasPlayingBeforeSeek = false;
-  pendingLocalSeekTarget = null;
-  localSeekRetryCount = 0;
-  remoteSeekTarget = null;
-  guardLocalPlayback(2500);
-
-  // 步骤2：拖动前处于播放中时，seek 完成后广播 play，覆盖原生控件产生的临时 pause。
-  if (shouldResume) {
-    suppressNextPlayEvent = true;
-    window.setTimeout(() => {
-      suppressNextPlayEvent = false;
-    }, 500);
-    void videoRef.value.play().catch(() => undefined);
-    send({ type: "play", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds });
-    return;
-  }
-  send({ type: "seek", roomCode: roomCode.value, memberId: identity.memberId, positionSeconds });
-}
-
-function onRateChange(): void {
-  if (!videoRef.value) return;
-  if (Date.now() < suppressRemoteRateEventUntil) {
-    return;
-  }
-  if (!isAllowedPlaybackRate(videoRef.value.playbackRate)) return;
-  guardLocalPlayback();
-  send({
-    type: "playback_rate_change",
-    roomCode: roomCode.value,
-    memberId: identity.memberId,
-    playbackRate: videoRef.value.playbackRate,
-    positionSeconds: videoRef.value.currentTime
+    operationId: createOperationId(),
+    baseVersion: intent.baseVersion,
+    action: intent.action,
+    positionSeconds: intent.positionSeconds,
+    playing: intent.playing,
+    playbackRate: intent.playbackRate
   });
 }
 
@@ -417,14 +218,10 @@ async function ensureHostStream(): Promise<HostStreamMesh> {
             ...(type === "ice_candidate" ? { candidate: payload } : { description: payload })
           } as ClientRoomEvent);
         },
-        async (stream) => {
+        (stream) => {
           console.log(`[HostStream] 远端媒体流已就绪，stream id=${stream.id}`);
+          remoteMediaStream.value = stream;
           remoteStreamReady.value = true;
-          await nextTick();
-          if (remoteStreamVideoRef.value) {
-            remoteStreamVideoRef.value.srcObject = stream;
-            await remoteStreamVideoRef.value.play().catch(() => undefined);
-          }
         },
         (memberId, state) => {
           hostStreamIceState.value = { ...hostStreamIceState.value, [memberId]: state };
@@ -476,9 +273,9 @@ function selectLocalVideo(event: Event): void {
 }
 
 async function startHostStream(): Promise<void> {
-  if (!hostVideoRef.value || !localVideoName.value || !room.value) return;
+  const video = hostPlayerRef.value?.getVideoElement();
+  if (!video || !localVideoName.value || !room.value) return;
   try {
-    const video = hostVideoRef.value;
     // 等待视频元数据加载完成，确保 captureStream 能获取音视频轨道
     if (video.readyState < 1) {
       await new Promise<void>((resolve) => {
@@ -501,6 +298,8 @@ function stopHostStream(): void {
   hostStream.value?.stop();
   hostStream.value = null;
   hostStreamPromise = null;
+  remoteMediaStream.value = null;
+  remoteStreamReady.value = false;
   hostStreamDiagnostics.value = {};
   hostStreamIceState.value = {};
   send({ type: "host_stream_stop", roomCode: roomCode.value, memberId: identity.memberId });
@@ -516,18 +315,19 @@ function requestHostControl(command: HostControlCommand): void {
 }
 
 function applyHostControl(command: HostControlCommand): void {
-  if (!isOwner.value || !hostVideoRef.value) return;
+  const video = hostPlayerRef.value?.getVideoElement();
+  if (!isOwner.value || !video) return;
   if (typeof command.positionSeconds === "number") {
-    hostVideoRef.value.currentTime = Math.max(0, command.positionSeconds);
+    video.currentTime = Math.max(0, command.positionSeconds);
   }
   if (typeof command.playbackRate === "number") {
-    hostVideoRef.value.playbackRate = command.playbackRate;
+    video.playbackRate = command.playbackRate;
   }
   if (command.action === "play") {
-    void hostVideoRef.value.play().catch(() => undefined);
+    void video.play().catch(() => undefined);
   }
   if (command.action === "pause") {
-    hostVideoRef.value.pause();
+    video.pause();
   }
 }
 
@@ -616,26 +416,20 @@ onMounted(async () => {
     await join();
     loadVideo(String(route.query.video));
   }
-  calibrationTimer = window.setInterval(() => {
-    if (videoRef.value && room.value) {
-      if (localSeeking.value || Date.now() < localPlaybackGuardUntil) return;
-      applyRemotePlaybackState(videoRef.value, room.value.playbackState);
-    }
-  }, 5000);
   roomRefreshTimer = window.setInterval(() => {
     void refreshRoomState();
   }, 5000);
 });
 
 onBeforeUnmount(() => {
-  if (calibrationTimer) window.clearInterval(calibrationTimer);
   if (roomRefreshTimer) window.clearInterval(roomRefreshTimer);
-  clearPendingPause();
   socket.close();
   voice.value?.leave();
   hostStream.value?.stop();
   hostStream.value = null;
   hostStreamPromise = null;
+  remoteMediaStream.value = null;
+  remoteStreamReady.value = false;
   hostStreamDiagnostics.value = {};
   hostStreamIceState.value = {};
   if (localVideoUrl.value) {
@@ -668,40 +462,39 @@ onBeforeUnmount(() => {
     <section v-else class="watch-layout">
       <section class="player-panel">
         <template v-if="isDirectMode && room.currentVideo">
-          <video
-            ref="videoRef"
-            class="video-player"
-            controls
+          <CustomVideoPlayer
+            ref="directPlayerRef"
+            sync-mode
             :src="room.currentVideo.playUrl"
-            @play="onPlay"
-            @pause="onPause"
-            @seeking="onSeeking"
-            @seeked="onSeeked"
-            @ratechange="onRateChange"
-          >
-            <track
-              v-if="room.currentSubtitle"
-              kind="subtitles"
-              srclang="zh"
-              label="房间字幕"
-              default
-              :src="room.currentSubtitle.trackUrl"
-            />
-          </video>
-          <div v-if="remotePlayBlocked" class="play-unlock">
-            <button class="primary" type="button" @click="resumeRemotePlayback">继续同步播放</button>
-            <span>浏览器已拦截自动播放，点击一次后会继续跟随房间进度</span>
-          </div>
+            :playback-state="room.playbackState"
+            :playback-rate-options="PLAYBACK_RATE_OPTIONS"
+            :subtitle-track="room.currentSubtitle ? { src: room.currentSubtitle.trackUrl, label: '房间字幕', srclang: 'zh' } : null"
+            @set-playback="handleDirectPlaybackIntent"
+          />
         </template>
 
         <div v-else-if="isHostStreamMode && isOwner" class="host-player">
-          <video ref="hostVideoRef" class="video-player" controls :src="localVideoUrl" />
+          <CustomVideoPlayer
+            v-if="localVideoUrl"
+            ref="hostPlayerRef"
+            :src="localVideoUrl"
+            :playback-rate-options="PLAYBACK_RATE_OPTIONS"
+          />
           <div v-if="!localVideoUrl" class="empty-player overlay-empty">
             <span>选择本地视频后开始房主推流</span>
           </div>
         </div>
 
-        <video v-else-if="isHostStreamMode" ref="remoteStreamVideoRef" class="video-player" controls autoplay playsinline />
+        <CustomVideoPlayer
+          v-else-if="isHostStreamMode"
+          src=""
+          autoplay
+          :media-stream="remoteMediaStream"
+          :show-progress="false"
+          :show-time="false"
+          :show-playback-rates="false"
+          :show-step-buttons="false"
+        />
 
         <div v-else class="empty-player">
           <span>选择一个网盘视频开始观影</span>
@@ -732,22 +525,6 @@ onBeforeUnmount(() => {
             <input v-model.number="volume" type="range" min="0" max="1" step="0.05" />
           </label>
           <small>当前身份：{{ currentMember?.nickname }}</small>
-        </section>
-
-        <section v-if="isDirectMode" class="card compact">
-          <h2>播放控制</h2>
-          <div class="mode-toggle rate-toggle">
-            <button
-              v-for="option in playbackRateOptions"
-              :key="option.value"
-              type="button"
-              :class="{ active: Math.abs(room.playbackState.playbackRate - option.value) < 0.001 }"
-              @click="changePlaybackRate(option.value)"
-            >
-              {{ option.label }}
-            </button>
-          </div>
-          <small>当前倍速：{{ formatPlaybackRate(room.playbackState.playbackRate) }}</small>
         </section>
 
         <section v-if="isDirectMode" class="card compact">
@@ -816,7 +593,6 @@ onBeforeUnmount(() => {
             <p v-else class="side-note">房主尚未开始推流</p>
             <button class="ghost full" @click="requestHostControl({ action: 'play' })">请求播放</button>
             <button class="ghost full" @click="requestHostControl({ action: 'pause' })">请求暂停</button>
-            <button class="ghost full" @click="requestHostControl({ action: 'seek', positionSeconds: Math.max(0, (remoteStreamVideoRef?.currentTime || 0) + 30) })">请求快进 30 秒</button>
           </template>
         </section>
       </aside>

@@ -19,12 +19,15 @@ function state(patch: Partial<PlaybackState> = {}): PlaybackState {
     playbackRate: 1.5,
     stateUpdatedAt: new Date().toISOString(),
     version: 1,
+    lastOperationId: null,
+    lastMemberId: null,
+    lastAction: null,
     ...patch
   };
 }
 
 describe("applyPlaybackState", () => {
-  it("2 秒以内的播放偏差使用基础倍速乘轻微修正", async () => {
+  it("3 秒以内的播放偏差使用基础倍速乘轻微修正", async () => {
     const video = createVideo(9);
 
     await applyPlaybackState(video, state({ positionSeconds: 10 }));
@@ -33,8 +36,8 @@ describe("applyPlaybackState", () => {
     expect(video.playbackRate).toBeCloseTo(1.5 * 1.05);
   });
 
-  it("超过 2 秒的播放偏差直接跳转目标时间", async () => {
-    const video = createVideo(7);
+  it("超过 3 秒的播放偏差直接跳转目标时间", async () => {
+    const video = createVideo(6);
 
     await applyPlaybackState(video, state({ positionSeconds: 10 }));
 

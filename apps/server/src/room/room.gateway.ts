@@ -104,21 +104,25 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.server.to(roomName).emit("room_event", this.realtime.stateEvent(room));
       return;
     }
-    if (event.type === "play") {
-      this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playing: true, positionSeconds: event.positionSeconds }));
-      return;
-    }
-    if (event.type === "pause") {
-      this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playing: false, positionSeconds: event.positionSeconds }));
-      return;
-    }
-    if (event.type === "seek") {
-      this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { positionSeconds: event.positionSeconds }));
-      return;
-    }
-    if (event.type === "playback_rate_change") {
+    if (event.type === "set_playback") {
       try {
-        this.broadcastState(roomName, this.rooms.updatePlayback(roomCode, { playbackRate: event.playbackRate, positionSeconds: event.positionSeconds }));
+        this.broadcastState(
+          roomName,
+          this.rooms.updatePlayback(
+            roomCode,
+            {
+              playing: event.playing,
+              positionSeconds: event.positionSeconds,
+              playbackRate: event.playbackRate
+            },
+            {
+              operationId: event.operationId,
+              memberId: event.memberId,
+              action: event.action,
+              baseVersion: event.baseVersion
+            }
+          )
+        );
       } catch (err) {
         if (err instanceof BadRequestException) {
           logWarn("RoomGateway", "拒绝非法播放倍速", {

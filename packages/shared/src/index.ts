@@ -61,6 +61,9 @@ export interface PlaybackState {
   playbackRate: number;
   stateUpdatedAt: string;
   version: number;
+  lastOperationId: string | null;
+  lastMemberId: string | null;
+  lastAction: PlaybackAction | null;
 }
 
 /**
@@ -71,6 +74,13 @@ export interface PlaybackState {
 export const PLAYBACK_RATE_OPTIONS = [1, 1.25, 1.5, 2] as const;
 
 export type PlaybackRateOption = (typeof PLAYBACK_RATE_OPTIONS)[number];
+
+/**
+ * 房间播放控制动作。
+ *
+ * @author 清羽
+ */
+export type PlaybackAction = "play" | "pause" | "seek" | "playback_rate_change" | "buffer_pause";
 
 /**
  * 房间观影模式。
@@ -150,13 +160,27 @@ export interface IceServerConfig {
   credential?: string;
 }
 
+/**
+ * 自定义播放器提交的原子播放状态变更。
+ *
+ * @author 清羽
+ */
+export interface SetPlaybackEvent {
+  type: "set_playback";
+  roomCode: string;
+  memberId: string;
+  operationId: string;
+  baseVersion: number;
+  action: PlaybackAction;
+  positionSeconds: number;
+  playing: boolean;
+  playbackRate: number;
+}
+
 export type ClientRoomEvent =
   | { type: "load_video"; roomCode: string; memberId: string; filePath: string }
   | { type: "select_subtitle"; roomCode: string; memberId: string; filePath: string | null }
-  | { type: "play"; roomCode: string; memberId: string; positionSeconds: number }
-  | { type: "pause"; roomCode: string; memberId: string; positionSeconds: number }
-  | { type: "seek"; roomCode: string; memberId: string; positionSeconds: number }
-  | { type: "playback_rate_change"; roomCode: string; memberId: string; playbackRate: number; positionSeconds: number }
+  | SetPlaybackEvent
   | { type: "voice_join"; roomCode: string; memberId: string }
   | { type: "voice_leave"; roomCode: string; memberId: string }
   | { type: "voice_mute"; roomCode: string; memberId: string; muted: boolean }

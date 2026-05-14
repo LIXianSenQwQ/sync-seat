@@ -27,6 +27,16 @@ function createService(): RoomService {
   );
 }
 
+function playbackOperation(patch: Partial<{ operationId: string; memberId: string; action: "play" | "pause" | "seek" | "playback_rate_change"; baseVersion: number }> = {}) {
+  return {
+    operationId: "op-1",
+    memberId: "m1",
+    action: "play" as const,
+    baseVersion: 0,
+    ...patch
+  };
+}
+
 describe("RoomService", () => {
   it("创建空房间并允许用正确密码加入", () => {
     const service = createService();
@@ -160,24 +170,39 @@ describe("RoomService", () => {
   it("播放状态按服务端接收顺序递增版本号，后到为准", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
-    const first = service.updatePlayback(room.roomCode, { playing: true, positionSeconds: 10 });
-    const second = service.updatePlayback(room.roomCode, { playing: false, positionSeconds: 20 });
+    const first = service.updatePlayback(room.roomCode, { playing: true, playbackRate: 1, positionSeconds: 10 }, playbackOperation({ operationId: "op-1", action: "play" }));
+    const second = service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 20 }, playbackOperation({ operationId: "op-2", action: "pause", baseVersion: 1 }));
 
     expect(first.playbackState.version).toBe(1);
     expect(second.playbackState.version).toBe(2);
     expect(second.playbackState.playing).toBe(false);
     expect(second.playbackState.positionSeconds).toBe(20);
+    expect(second.playbackState).toMatchObject({
+      lastOperationId: "op-2",
+      lastMemberId: "m1",
+      lastAction: "pause"
+    });
   });
 
   it("只允许固定房间倍速并递增播放版本", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
-    const updated = service.updatePlayback(room.roomCode, { playbackRate: 1.5, positionSeconds: 12 });
+    const updated = service.updatePlayback(
+      room.roomCode,
+      { playing: false, playbackRate: 1.5, positionSeconds: 12 },
+      playbackOperation({ action: "playback_rate_change" })
+    );
 
     expect(updated.playbackState.playbackRate).toBe(1.5);
     expect(updated.playbackState.positionSeconds).toBe(12);
     expect(updated.playbackState.version).toBe(1);
-    expect(() => service.updatePlayback(room.roomCode, { playbackRate: 1.4, positionSeconds: 13 })).toThrow(BadRequestException);
+    expect(() =>
+      service.updatePlayback(
+        room.roomCode,
+        { playing: false, playbackRate: 1.4, positionSeconds: 13 },
+        playbackOperation({ action: "playback_rate_change" })
+      )
+    ).toThrow(BadRequestException);
     expect(service.getRoom(room.roomCode).playbackState).toMatchObject({
       playbackRate: 1.5,
       positionSeconds: 12,
@@ -189,7 +214,7 @@ describe("RoomService", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
     service.selectSubtitle(room.roomCode, "/Movies/demo.srt");
-    service.updatePlayback(room.roomCode, { playbackRate: 2, positionSeconds: 30 });
+    service.updatePlayback(room.roomCode, { playing: true, playbackRate: 2, positionSeconds: 30 }, playbackOperation({ action: "playback_rate_change" }));
     const updated = await service.loadVideo(room.roomCode, "/Movies/demo.mp4");
 
     expect(updated.currentVideo).toEqual({

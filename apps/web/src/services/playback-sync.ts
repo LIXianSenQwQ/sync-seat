@@ -26,10 +26,10 @@ export function applyPlaybackState(video: HTMLVideoElement, state: PlaybackState
   const absDrift = Math.abs(drift);
   let nextPlaybackRate = state.playbackRate;
 
-  // 步骤1：暂停时强制对齐所有成员；播放时 2 秒以上才直接 seek，避免小偏差造成画面跳动。
+  // 步骤1：暂停时强制对齐所有成员；播放时 3 秒以上才直接 seek，优先保证观影画面顺滑。
   if (!state.playing) {
     video.currentTime = target;
-  } else if (absDrift > 2) {
+  } else if (absDrift > 3) {
     video.currentTime = target;
   } else if (absDrift >= 0.5) {
     nextPlaybackRate = state.playbackRate * (drift > 0 ? 1.05 : 0.95);
