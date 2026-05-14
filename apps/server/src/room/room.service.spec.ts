@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, NotFoundException } from "@nestjs/common";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CurrentVideo } from "@sync-seat/shared";
 import { RoomService } from "./room.service.js";
 
@@ -27,7 +27,7 @@ function createService(): RoomService {
   );
 }
 
-function playbackOperation(patch: Partial<{ operationId: string; memberId: string; action: "play" | "pause" | "seek" | "playback_rate_change"; baseVersion: number }> = {}) {
+function playbackOperation(patch: Partial<{ operationId: string; memberId: string; action: "play" | "pause" | "seek" | "playback_rate_change" | "buffer_pause"; baseVersion: number }> = {}) {
   return {
     operationId: "op-1",
     memberId: "m1",
@@ -38,6 +38,10 @@ function playbackOperation(patch: Partial<{ operationId: string; memberId: strin
 }
 
 describe("RoomService", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("创建空房间并允许用正确密码加入", () => {
     const service = createService();
     const room = service.createRoom("m1", "清羽", "secret");
@@ -170,8 +174,8 @@ describe("RoomService", () => {
   it("播放状态按服务端接收顺序递增版本号，后到为准", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
-    const first = service.updatePlayback(room.roomCode, { playing: true, playbackRate: 1, positionSeconds: 10 }, playbackOperation({ operationId: "op-1", action: "play" }));
-    const second = service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 20 }, playbackOperation({ operationId: "op-2", action: "pause", baseVersion: 1 }));
+    const first = service.updatePlayback(room.roomCode, { playing: true, playbackRate: 1, positionSeconds: 10 }, playbackOperation({ operationId: "op-1", action: "seek" }));
+    const second = service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 20 }, playbackOperation({ operationId: "op-2", action: "seek", baseVersion: 1 }));
 
     expect(first.playbackState.version).toBe(1);
     expect(second.playbackState.version).toBe(2);
@@ -180,33 +184,115 @@ describe("RoomService", () => {
     expect(second.playbackState).toMatchObject({
       lastOperationId: "op-2",
       lastMemberId: "m1",
-      lastAction: "pause"
+      lastAction: "seek"
+    });
+  });
+
+  it("暂停后用本地偏移恢复播放时沿用服务端暂停位置", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 30 }, playbackOperation({ action: "seek" }));
+
+    const updated = service.updatePlayback(
+      room.roomCode,
+      { playing: true, playbackRate: 1, positionSeconds: 12 },
+      playbackOperation({ operationId: "op-play", memberId: "m2", action: "play", baseVersion: 1 })
+    );
+
+    expect(updated.playbackState).toMatchObject({
+      playing: true,
+      positionSeconds: 30,
+      playbackRate: 1,
+      version: 2,
+      lastOperationId: "op-play",
+      lastMemberId: "m2",
+      lastAction: "play"
+    });
+  });
+
+  it("播放中暂停时按服务端权威时间计算暂停点", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.updatePlayback(room.roomCode, { playing: true, playbackRate: 1, positionSeconds: 10 }, playbackOperation({ action: "seek" }));
+    vi.setSystemTime(new Date("2026-01-01T00:00:04.500Z"));
+
+    const updated = service.updatePlayback(
+      room.roomCode,
+      { playing: false, playbackRate: 1, positionSeconds: 99 },
+      playbackOperation({ operationId: "op-pause", memberId: "m2", action: "pause", baseVersion: 1 })
+    );
+
+    expect(updated.playbackState.playing).toBe(false);
+    expect(updated.playbackState.positionSeconds).toBeCloseTo(14.5);
+    expect(updated.playbackState.playbackRate).toBe(1);
+  });
+
+  it("倍速变化保留服务端当前目标时间且只更新倍速", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.updatePlayback(room.roomCode, { playing: true, playbackRate: 1, positionSeconds: 20 }, playbackOperation({ action: "seek" }));
+    vi.setSystemTime(new Date("2026-01-01T00:00:02.000Z"));
+
+    const updated = service.updatePlayback(
+      room.roomCode,
+      { playing: false, playbackRate: 1.5, positionSeconds: 99 },
+      playbackOperation({ action: "playback_rate_change", baseVersion: 1 })
+    );
+
+    expect(updated.playbackState.playing).toBe(true);
+    expect(updated.playbackState.positionSeconds).toBeCloseTo(22);
+    expect(updated.playbackState.playbackRate).toBe(1.5);
+  });
+
+  it("旧版本的非 seek 播放控制不会覆盖当前权威状态", () => {
+    const service = createService();
+    const room = service.createRoom("m1", "A");
+    service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 10 }, playbackOperation({ operationId: "op-1", action: "seek" }));
+    service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 40 }, playbackOperation({ operationId: "op-2", action: "seek", baseVersion: 1 }));
+
+    const updated = service.updatePlayback(
+      room.roomCode,
+      { playing: true, playbackRate: 1, positionSeconds: 5 },
+      playbackOperation({ operationId: "op-old", action: "play", baseVersion: 1 })
+    );
+
+    expect(updated.playbackState).toMatchObject({
+      playing: false,
+      positionSeconds: 40,
+      playbackRate: 1,
+      version: 2,
+      lastOperationId: "op-2"
     });
   });
 
   it("只允许固定房间倍速并递增播放版本", () => {
     const service = createService();
     const room = service.createRoom("m1", "A");
+    service.updatePlayback(room.roomCode, { playing: false, playbackRate: 1, positionSeconds: 12 }, playbackOperation({ action: "seek" }));
     const updated = service.updatePlayback(
       room.roomCode,
-      { playing: false, playbackRate: 1.5, positionSeconds: 12 },
-      playbackOperation({ action: "playback_rate_change" })
+      { playing: false, playbackRate: 1.5, positionSeconds: 99 },
+      playbackOperation({ action: "playback_rate_change", baseVersion: 1 })
     );
 
     expect(updated.playbackState.playbackRate).toBe(1.5);
     expect(updated.playbackState.positionSeconds).toBe(12);
-    expect(updated.playbackState.version).toBe(1);
+    expect(updated.playbackState.version).toBe(2);
     expect(() =>
       service.updatePlayback(
         room.roomCode,
         { playing: false, playbackRate: 1.4, positionSeconds: 13 },
-        playbackOperation({ action: "playback_rate_change" })
+        playbackOperation({ action: "playback_rate_change", baseVersion: 2 })
       )
     ).toThrow(BadRequestException);
     expect(service.getRoom(room.roomCode).playbackState).toMatchObject({
       playbackRate: 1.5,
       positionSeconds: 12,
-      version: 1
+      version: 2
     });
   });
 

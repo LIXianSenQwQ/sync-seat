@@ -1,6 +1,6 @@
 import { mount } from "@vue/test-utils";
 import type { PlaybackState } from "@sync-seat/shared";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import CustomVideoPlayer from "./CustomVideoPlayer.vue";
 
 function state(patch: Partial<PlaybackState> = {}): PlaybackState {
@@ -34,6 +34,10 @@ function prepareProgress(element: Element): void {
 }
 
 describe("CustomVideoPlayer", () => {
+  afterEach(() => {
+    document.body.className = "";
+  });
+
   it("拖动中只更新控件 UI，不改 video.currentTime 且不发送同步事件", async () => {
     const wrapper = mount(CustomVideoPlayer, {
       props: {
@@ -104,5 +108,94 @@ describe("CustomVideoPlayer", () => {
     await video.dispatchEvent(new Event("seeked"));
 
     expect(wrapper.emitted("set-playback")).toBeUndefined();
+  });
+
+  it("暂停态点击播放时使用房间权威暂停位置而不是本地残留时间", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "/demo.mp4",
+        syncMode: true,
+        playbackState: state({ playing: false, positionSeconds: 30, version: 5 })
+      }
+    });
+    const video = wrapper.find("video").element as HTMLVideoElement;
+    prepareVideo(video);
+    video.currentTime = 44;
+    await video.dispatchEvent(new Event("loadedmetadata"));
+
+    await wrapper.find("button[title='播放']").trigger("click");
+
+    const events = wrapper.emitted("set-playback");
+    expect(events).toHaveLength(1);
+    expect(events?.[0]?.[0]).toMatchObject({
+      action: "play",
+      positionSeconds: 30,
+      playing: true,
+      playbackRate: 1,
+      baseVersion: 5
+    });
+  });
+
+  it("点击静音按钮不会冒泡触发播放或暂停同步", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "/demo.mp4",
+        syncMode: true,
+        playbackState: state({ playing: false, positionSeconds: 12, version: 3 })
+      }
+    });
+    const video = wrapper.find("video").element as HTMLVideoElement;
+    prepareVideo(video);
+    await video.dispatchEvent(new Event("loadedmetadata"));
+
+    await wrapper.find("button[title='静音']").trigger("click");
+
+    expect(wrapper.emitted("set-playback")).toBeUndefined();
+  });
+
+  it("容器不支持 Fullscreen API 时进入伪全屏且不调用 video 原生全屏", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "/demo.mp4"
+      }
+    });
+    const root = wrapper.find(".custom-player").element as HTMLElement;
+    const video = wrapper.find("video").element as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+    const webkitEnterFullscreen = vi.fn();
+    Object.defineProperty(root, "requestFullscreen", { configurable: true, value: undefined });
+    Object.defineProperty(video, "webkitEnterFullscreen", { configurable: true, value: webkitEnterFullscreen });
+
+    await wrapper.find("button[title='全屏']").trigger("click");
+
+    expect(webkitEnterFullscreen).not.toHaveBeenCalled();
+    expect(root.classList.contains("mobile-pseudo-fullscreen")).toBe(true);
+    expect(document.body.classList.contains("custom-player-pseudo-fullscreen-open")).toBe(true);
+  });
+
+  it("伪全屏状态下再次点击全屏按钮会退出并清理 body class", async () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "/demo.mp4"
+      }
+    });
+    const root = wrapper.find(".custom-player").element as HTMLElement;
+    Object.defineProperty(root, "requestFullscreen", { configurable: true, value: undefined });
+
+    await wrapper.find("button[title='全屏']").trigger("click");
+    await wrapper.find("button[title='退出全屏']").trigger("click");
+
+    expect(root.classList.contains("mobile-pseudo-fullscreen")).toBe(false);
+    expect(document.body.classList.contains("custom-player-pseudo-fullscreen-open")).toBe(false);
+  });
+
+  it("仍然向外暴露底层 video 元素", () => {
+    const wrapper = mount(CustomVideoPlayer, {
+      props: {
+        src: "/demo.mp4"
+      }
+    });
+    const exposed = wrapper.vm as unknown as { getVideoElement: () => HTMLVideoElement | null };
+
+    expect(exposed.getVideoElement()).toBe(wrapper.find("video").element);
   });
 });

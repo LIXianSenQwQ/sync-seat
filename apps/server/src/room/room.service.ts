@@ -317,6 +317,7 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
    *
    * @param roomCode 房间码。
    * @param patch 播放状态变更。
+   * @param operation 播放操作元信息，用于识别旧版本控制事件。
    * @returns 更新后的房间状态。
    */
   updatePlayback(
@@ -329,7 +330,20 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
     if (!this.isAllowedPlaybackRate(patch.playbackRate)) {
       throw new BadRequestException(`只支持 ${PLAYBACK_RATE_OPTIONS.map((rate) => `${rate}x`).join("、")} 倍速`);
     }
-    room.playbackState = this.nextPlaybackState(room, patch, operation);
+    if (operation.action !== "seek" && operation.baseVersion < room.playbackState.version) {
+      logWarn("RoomService", "忽略旧版本播放状态变更", {
+        roomCode: room.roomCode,
+        operationId: operation.operationId,
+        memberId: operation.memberId,
+        action: operation.action,
+        baseVersion: operation.baseVersion,
+        currentVersion: room.playbackState.version
+      });
+      return clonePublicRoom(room);
+    }
+
+    const nextPatch = this.resolvePlaybackPatch(room.playbackState, patch, operation.action);
+    room.playbackState = this.nextPlaybackState(room, nextPatch, operation);
     this.touch(room);
     logInfo("RoomService", "房间播放状态变更", {
       roomCode: room.roomCode,
@@ -539,6 +553,50 @@ export class RoomService implements OnModuleInit, OnModuleDestroy {
       lastMemberId: operation.memberId,
       lastAction: operation.action
     };
+  }
+
+  private resolvePlaybackPatch(
+    current: PlaybackState,
+    patch: Pick<PlaybackState, "positionSeconds" | "playing" | "playbackRate">,
+    action: PlaybackAction
+  ): Pick<PlaybackState, "positionSeconds" | "playing" | "playbackRate"> {
+    const currentPosition = this.currentPlaybackPosition(current);
+
+    // 步骤1：只有明确拖动进度时才信任客户端提交的位置，避免观众本地漂移反写成权威时间。
+    if (action === "seek") {
+      return patch;
+    }
+
+    // 步骤2：播放、暂停和缓冲暂停都沿用服务端当前权威位置，不使用客户端本地时间。
+    if (action === "play") {
+      return {
+        playing: true,
+        positionSeconds: current.playing ? currentPosition : current.positionSeconds,
+        playbackRate: current.playbackRate
+      };
+    }
+    if (action === "pause" || action === "buffer_pause") {
+      return {
+        playing: false,
+        positionSeconds: currentPosition,
+        playbackRate: current.playbackRate
+      };
+    }
+
+    // 步骤3：倍速变化只改变倍速，播放位置和播放/暂停状态仍以服务端当前状态为准。
+    return {
+      playing: current.playing,
+      positionSeconds: currentPosition,
+      playbackRate: patch.playbackRate
+    };
+  }
+
+  private currentPlaybackPosition(state: PlaybackState, nowMs = Date.now()): number {
+    if (!state.playing) {
+      return state.positionSeconds;
+    }
+    const elapsedSeconds = Math.max(0, nowMs - Date.parse(state.stateUpdatedAt)) / 1000;
+    return state.positionSeconds + elapsedSeconds * state.playbackRate;
   }
 
   private isAllowedPlaybackRate(playbackRate: number): boolean {

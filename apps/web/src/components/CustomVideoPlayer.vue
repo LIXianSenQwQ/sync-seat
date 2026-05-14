@@ -69,13 +69,15 @@ const playing = ref(false);
 const muted = ref(false);
 const volume = ref(1);
 const controlsVisible = ref(true);
-const isFullscreen = ref(false);
+const isNativeFullscreen = ref(false);
+const isPseudoFullscreen = ref(false);
 const remotePlayBlocked = ref(false);
 let wasPlayingBeforeDrag = false;
 let rafId = 0;
 let hideControlsTimer: number | null = null;
 let deferredRemoteState: PlaybackState | null = null;
 let lastAppliedVersion = -1;
+const PSEUDO_FULLSCREEN_BODY_CLASS = "custom-player-pseudo-fullscreen-open";
 
 const safeDuration = computed(() => (Number.isFinite(duration.value) && duration.value > 0 ? duration.value : 0));
 const displayTime = computed(() => {
@@ -96,6 +98,7 @@ const bufferedPercent = computed(() => {
 const sliderValue = computed(() => Math.round(displayTime.value));
 const rateValue = computed(() => props.playbackState?.playbackRate ?? videoRef.value?.playbackRate ?? 1);
 const showLoading = computed(() => waiting.value || pendingSeekTarget.value !== null);
+const isFullscreen = computed(() => isNativeFullscreen.value || isPseudoFullscreen.value);
 
 function getVideoElement(): HTMLVideoElement | null {
   return videoRef.value;
@@ -144,6 +147,14 @@ function emitPlayback(action: PlaybackAction, positionSeconds: number, nextPlayi
   });
 }
 
+function authoritativeIntentPosition(action: PlaybackAction, fallbackPosition: number): number {
+  if (!props.playbackState || action === "seek") {
+    return fallbackPosition;
+  }
+  // 步骤1：播放/暂停/倍速变化不表达新的进度位置，优先沿用房间权威状态，避免本地残留偏移回写。
+  return targetPosition(props.playbackState);
+}
+
 async function userTogglePlayback(): Promise<void> {
   const video = videoRef.value;
   if (!video) return;
@@ -152,13 +163,13 @@ async function userTogglePlayback(): Promise<void> {
   if (playing.value || props.playbackState?.playing) {
     video.pause();
     playing.value = false;
-    emitPlayback("pause", video.currentTime, false);
+    emitPlayback("pause", authoritativeIntentPosition("pause", video.currentTime), false);
     return;
   }
   try {
     await video.play();
     playing.value = true;
-    emitPlayback("play", video.currentTime, true);
+    emitPlayback("play", authoritativeIntentPosition("play", video.currentTime), true);
   } catch (err) {
     if (err instanceof DOMException && err.name === "NotAllowedError") {
       remotePlayBlocked.value = true;
@@ -166,11 +177,26 @@ async function userTogglePlayback(): Promise<void> {
   }
 }
 
+function isInteractiveControl(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button, input, select, textarea, a, [role='slider']"));
+}
+
+function handlePlayerClick(event: MouseEvent): void {
+  showControls();
+  if (isInteractiveControl(event.target)) return;
+  void userTogglePlayback();
+}
+
 function userChangeRate(nextRate: number): void {
   const video = videoRef.value;
   if (!video) return;
   video.playbackRate = nextRate;
-  emitPlayback("playback_rate_change", video.currentTime, playing.value || Boolean(props.playbackState?.playing), nextRate);
+  emitPlayback(
+    "playback_rate_change",
+    authoritativeIntentPosition("playback_rate_change", video.currentTime),
+    playing.value || Boolean(props.playbackState?.playing),
+    nextRate
+  );
 }
 
 function pointerToPosition(event: PointerEvent): number {
@@ -363,23 +389,43 @@ function showControls(): void {
   }, 2500);
 }
 
+function enterPseudoFullscreen(): void {
+  const root = rootRef.value;
+  if (!root) return;
+  isPseudoFullscreen.value = true;
+  document.body.classList.add(PSEUDO_FULLSCREEN_BODY_CLASS);
+  showControls();
+}
+
+function exitPseudoFullscreen(): void {
+  isPseudoFullscreen.value = false;
+  document.body.classList.remove(PSEUDO_FULLSCREEN_BODY_CLASS);
+}
+
 async function toggleFullscreen(): Promise<void> {
   const root = rootRef.value;
-  const video = videoRef.value as (HTMLVideoElement & { webkitEnterFullscreen?: () => void; webkitRequestFullscreen?: () => Promise<void> | void }) | null;
   if (!root) return;
+  if (isPseudoFullscreen.value) {
+    exitPseudoFullscreen();
+    return;
+  }
   if (document.fullscreenElement) {
     await document.exitFullscreen();
     return;
   }
   if (root.requestFullscreen) {
-    await root.requestFullscreen();
+    try {
+      await root.requestFullscreen();
+    } catch {
+      enterPseudoFullscreen();
+    }
     return;
   }
-  if (video?.webkitEnterFullscreen) {
-    video.webkitEnterFullscreen();
-    return;
-  }
-  await video?.webkitRequestFullscreen?.();
+  enterPseudoFullscreen();
+}
+
+function handleFullscreenChange(): void {
+  isNativeFullscreen.value = Boolean(document.fullscreenElement);
 }
 
 function frame(): void {
@@ -420,9 +466,7 @@ onMounted(() => {
   readStoredVolume();
   syncLocalVolume();
   syncMediaStream();
-  document.addEventListener("fullscreenchange", () => {
-    isFullscreen.value = Boolean(document.fullscreenElement);
-  });
+  document.addEventListener("fullscreenchange", handleFullscreenChange);
   rafId = window.requestAnimationFrame(frame);
   void nextTick(() => {
     if (props.autoplay) {
@@ -434,6 +478,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (rafId) window.cancelAnimationFrame(rafId);
   if (hideControlsTimer) window.clearTimeout(hideControlsTimer);
+  document.removeEventListener("fullscreenchange", handleFullscreenChange);
+  exitPseudoFullscreen();
 });
 </script>
 
@@ -441,10 +487,11 @@ onBeforeUnmount(() => {
   <div
     ref="rootRef"
     class="custom-player"
-    :class="{ 'controls-hidden': !controlsVisible, loading: showLoading }"
+    :class="{ 'controls-hidden': !controlsVisible, loading: showLoading, 'mobile-pseudo-fullscreen': isPseudoFullscreen }"
     tabindex="0"
     @keydown="handlePlayerKeydown"
     @pointermove="showControls"
+    @click="handlePlayerClick"
   >
     <video
       ref="videoRef"
@@ -490,7 +537,7 @@ onBeforeUnmount(() => {
       <span>浏览器已拦截自动播放，点击后继续跟随房间进度</span>
     </div>
 
-    <div class="player-controls" @pointermove.stop="showControls">
+    <div class="player-controls" @pointermove.stop="showControls" @click.stop>
       <div
         v-if="showProgress"
         ref="progressRef"
@@ -571,6 +618,8 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 72vh;
   background: #050607;
+  object-fit: contain;
+  pointer-events: none;
 }
 
 .custom-player-video::-webkit-media-controls,
@@ -580,6 +629,25 @@ onBeforeUnmount(() => {
   display: none !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+:global(body.custom-player-pseudo-fullscreen-open) {
+  overflow: hidden;
+}
+
+.custom-player.mobile-pseudo-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  width: 100vw;
+  height: 100dvh;
+  min-height: 100dvh;
+  border-radius: 0;
+}
+
+.custom-player.mobile-pseudo-fullscreen .custom-player-video {
+  height: 100%;
+  min-height: 100dvh;
 }
 
 .player-center-state {
