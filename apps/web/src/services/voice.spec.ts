@@ -38,6 +38,7 @@ class FakeAudioContext {
   destination = {};
   sources: Array<{ stream: MediaStream; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
   gains: Array<{ gain: { value: number }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
+  destinations: Array<{ stream: MediaStream; disconnect: ReturnType<typeof vi.fn> }> = [];
   resume = vi.fn(async () => undefined);
   close = vi.fn(async () => undefined);
 
@@ -56,6 +57,12 @@ class FakeAudioContext {
     this.gains.push(gain);
     return gain as unknown as GainNode;
   }
+
+  createMediaStreamDestination(): MediaStreamAudioDestinationNode {
+    const destination = { stream: new MediaStream(), disconnect: vi.fn() };
+    this.destinations.push(destination);
+    return destination as unknown as MediaStreamAudioDestinationNode;
+  }
 }
 
 const remoteMember: RoomMember = {
@@ -70,6 +77,7 @@ const remoteMember: RoomMember = {
 describe("VoiceMesh", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    document.body.innerHTML = "";
     FakeRTCPeerConnection.configs = [];
     FakeRTCPeerConnection.instances = [];
     FakeAudioContext.contexts = [];
@@ -163,7 +171,9 @@ describe("VoiceMesh", () => {
 
     expect(context.sources[0].disconnect).toHaveBeenCalledTimes(1);
     expect(context.gains[0].disconnect).toHaveBeenCalledTimes(1);
+    expect(context.destinations[0].disconnect).toHaveBeenCalledTimes(1);
     expect(context.close).toHaveBeenCalledTimes(1);
+    expect(document.querySelectorAll("audio")).toHaveLength(0);
   });
 });
 
@@ -185,6 +195,6 @@ async function createJoinedVoiceMesh(): Promise<VoiceMesh> {
 }
 
 function emitRemoteTrack(): void {
-  const remoteStream = {} as MediaStream;
+  const remoteStream = new MediaStream();
   FakeRTCPeerConnection.instances[0].ontrack?.({ streams: [remoteStream] } as unknown as RTCTrackEvent);
 }

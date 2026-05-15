@@ -6,6 +6,8 @@ type RemoteVoiceAudio = {
   context: AudioContext;
   source: MediaStreamAudioSourceNode;
   gain: GainNode;
+  destination: MediaStreamAudioDestinationNode;
+  element: HTMLAudioElement;
 };
 
 /**
@@ -115,7 +117,7 @@ export class VoiceMesh {
     // 步骤1：本地音频轨道加入每条 TURN 中继语音连接。
     this.localStream?.getTracks().forEach((track) => peer.addTrack(track, this.localStream!));
 
-    // 步骤2：远端音轨通过 Web Audio 增益节点播放，允许语音音量超过浏览器原生 100%。
+    // 步骤2：远端音轨通过 Web Audio 增益后交给 audio 元素播放，兼顾增益和浏览器播放兼容性。
     peer.ontrack = (event) => {
       const [remoteStream] = event.streams;
       if (remoteStream) this.attachRemoteAudio(targetMemberId, remoteStream);
@@ -153,15 +155,22 @@ export class VoiceMesh {
     const context = new AudioContextConstructor();
     const source = context.createMediaStreamSource(stream);
     const gain = context.createGain();
+    const destination = context.createMediaStreamDestination();
+    const element = document.createElement("audio");
 
     // 步骤1：将 UI 的 0..1 音量映射为 0..2 增益，保留原滑块交互但提供最高 200% 响度。
     gain.gain.value = this.resolveRemoteVoiceGain();
 
-    // 步骤2：远端流只接入 Web Audio 目的地，避免和隐藏 audio 元素产生双重播放。
+    // 步骤2：Web Audio 只负责放大，最终仍用隐藏 audio 元素承载播放，避免部分浏览器 destination 无声。
     source.connect(gain);
-    gain.connect(context.destination);
+    gain.connect(destination);
+    element.autoplay = true;
+    element.volume = 1;
+    element.srcObject = destination.stream;
+    document.body.appendChild(element);
     void context.resume().catch(() => undefined);
-    this.remoteAudio.set(targetMemberId, { context, source, gain });
+    void element.play().catch(() => undefined);
+    this.remoteAudio.set(targetMemberId, { context, source, gain, destination, element });
   }
 
   /**
@@ -177,6 +186,10 @@ export class VoiceMesh {
     for (const [memberId, audio] of entries) {
       audio.source.disconnect();
       audio.gain.disconnect();
+      audio.destination.disconnect();
+      audio.element.pause();
+      audio.element.srcObject = null;
+      audio.element.remove();
       void audio.context.close().catch(() => undefined);
       this.remoteAudio.delete(memberId);
     }
