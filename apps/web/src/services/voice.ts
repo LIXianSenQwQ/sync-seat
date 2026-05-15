@@ -52,8 +52,17 @@ export class VoiceMesh {
   async join(members: RoomMember[], localStream?: MediaStream): Promise<void> {
     await this.ensureAudioContext();
     this.localStream = localStream ?? await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    await this.syncMembers(members);
+  }
+
+  /**
+   * 按最新房间成员状态补齐语音连接。
+   *
+   * @param members 当前房间成员列表。
+   */
+  async syncMembers(members: RoomMember[]): Promise<void> {
     for (const member of members) {
-      if (member.memberId !== this.memberId && member.voiceJoined) {
+      if (member.memberId !== this.memberId && member.voiceJoined && this.shouldInitiatePeer(member.memberId)) {
         await this.ensurePeer(member.memberId, true);
       }
     }
@@ -154,6 +163,16 @@ export class VoiceMesh {
       this.sendSignal(targetMemberId, "offer", offer);
     }
     return peer;
+  }
+
+  /**
+   * 判断当前成员是否负责主动发起指定成员的语音连接。
+   *
+   * @param targetMemberId 目标成员 ID。
+   * @returns 当前成员是否作为 offer 发起方。
+   */
+  private shouldInitiatePeer(targetMemberId: string): boolean {
+    return this.memberId.localeCompare(targetMemberId) < 0;
   }
 
   /**

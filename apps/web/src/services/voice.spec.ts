@@ -247,16 +247,36 @@ describe("VoiceMesh", () => {
     const sentSignals: Array<{ from: string; target: string; type: "offer" | "answer" | "ice_candidate"; payload: unknown }> = [];
     const owner = await createVoiceMesh("owner", [], sentSignals);
     const viewer = await createVoiceMesh("viewer", [{ ...remoteMember, memberId: "owner" }], sentSignals);
-    const offer = sentSignals.find((signal) => signal.from === "viewer" && signal.target === "owner" && signal.type === "offer")!;
+    await owner.syncMembers([
+      { ...remoteMember, memberId: "owner" },
+      { ...remoteMember, memberId: "viewer" }
+    ]);
+    const offer = sentSignals.find((signal) => signal.from === "owner" && signal.target === "viewer" && signal.type === "offer")!;
 
-    await owner.handleSignal("viewer", "offer", offer.payload);
-    const answer = sentSignals.find((signal) => signal.from === "owner" && signal.target === "viewer" && signal.type === "answer")!;
-    await viewer.handleSignal("owner", "answer", answer.payload);
+    await viewer.handleSignal("owner", "offer", offer.payload);
+    const answer = sentSignals.find((signal) => signal.from === "viewer" && signal.target === "owner" && signal.type === "answer")!;
+    await owner.handleSignal("viewer", "answer", answer.payload);
     emitRemoteTrackAt(0);
     emitRemoteTrackAt(1);
 
     expect(FakeRTCPeerConnection.instances).toHaveLength(2);
     expect(FakeAudioContext.contexts[0].sources).toHaveLength(2);
+  });
+
+  it("双方几乎同时加入语音时按成员 ID 确定一个 offer 发起方并补齐连接", async () => {
+    const sentSignals: Array<{ from: string; target: string; type: "offer" | "answer" | "ice_candidate"; payload: unknown }> = [];
+    const owner = await createVoiceMesh("owner", [], sentSignals);
+    const viewer = await createVoiceMesh("viewer", [], sentSignals);
+    const voiceMembers = [
+      { ...remoteMember, memberId: "owner" },
+      { ...remoteMember, memberId: "viewer" }
+    ];
+
+    await owner.syncMembers(voiceMembers);
+    await viewer.syncMembers(voiceMembers);
+    const offers = sentSignals.filter((signal) => signal.type === "offer");
+
+    expect(offers).toEqual([{ from: "owner", target: "viewer", type: "offer", payload: { type: "offer", sdp: "offer" } }]);
   });
 
   it("观众先加入语音、房主后加入语音时双方都能处理远端音轨", async () => {

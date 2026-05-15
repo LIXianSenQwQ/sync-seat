@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { PLAYBACK_RATE_OPTIONS, type ClientProgressSnapshot, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type HostStreamPlaybackSnapshot, type HostStreamQuality, type MemberWatchProgressSnapshot, type RoomState } from "@sync-seat/shared";
+import { PLAYBACK_RATE_OPTIONS, type ClientProgressSnapshot, type ClientRoomEvent, type DriveEntry, type HostControlCommand, type HostStreamPlaybackSnapshot, type HostStreamQuality, type MemberWatchProgressSnapshot, type RoomState, type ServerRoomEvent } from "@sync-seat/shared";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import CustomVideoPlayer from "../components/CustomVideoPlayer.vue";
@@ -67,6 +67,7 @@ let hostPlaybackSnapshotAbortController: AbortController | null = null;
 let lastHostPlaybackSnapshotSentAt = 0;
 let watchProgressTimer: number | null = null;
 let playbackTimeTimer: number | null = null;
+const pendingVoiceSignals: Array<Extract<ServerRoomEvent, { type: "voice_signal" }>> = [];
 const clockNowMs = ref(0);
 
 const hostStreamQualityOptions: { label: string; value: HostStreamQuality }[] = [
@@ -172,8 +173,11 @@ function connectSocket(): void {
       if (nextRoom.watchMode === "host-stream") {
         if (isOwner.value) await hostStream.value?.publishToMembers(nextRoom.members);
       }
+      if (voiceJoined.value) {
+        await voice.value?.syncMembers(nextRoom.members);
+      }
     },
-    (event) => { void voice.value?.handleSignal(event.fromMemberId, event.signalType, event.payload); },
+    (event) => { handleVoiceSignal(event); },
     (event) => {
       void ensureHostStream().then(
         (mesh) => mesh.handleSignal(event.fromMemberId, event.signalType, event.payload),
@@ -212,6 +216,7 @@ function connectSocket(): void {
       error.value = reason;
       room.value = null;
       voice.value?.leave(); voice.value = null;
+      pendingVoiceSignals.length = 0;
       voiceJoined.value = false; voiceRelayError.value = ""; voiceIceState.value = {};
       hostStream.value?.stop(); remoteMediaStream.value = null;
       remoteStreamReady.value = false; hostStreamPlaybackSnapshot.value = null; hostStreamPlaybackClock.value = null; memberProgressById.value = {}; hostStreamDiagnostics.value = {}; hostStreamIceState.value = {};
@@ -469,6 +474,23 @@ function unbindHostPlaybackSnapshotEvents(): void {
   hostPlaybackSnapshotVideo = null;
 }
 
+function handleVoiceSignal(event: Extract<ServerRoomEvent, { type: "voice_signal" }>): void {
+  if (!voice.value) {
+    pendingVoiceSignals.push(event);
+    if (pendingVoiceSignals.length > 50) pendingVoiceSignals.shift();
+    return;
+  }
+  void voice.value.handleSignal(event.fromMemberId, event.signalType, event.payload);
+}
+
+async function flushPendingVoiceSignals(): Promise<void> {
+  if (!voice.value) return;
+  const signals = pendingVoiceSignals.splice(0);
+  for (const signal of signals) {
+    await voice.value.handleSignal(signal.fromMemberId, signal.signalType, signal.payload);
+  }
+}
+
 async function joinVoice(): Promise<void> {
   if (voiceJoining.value || voiceJoined.value) return;
   let localStream: MediaStream | null = null;
@@ -492,6 +514,7 @@ async function joinVoice(): Promise<void> {
     await voice.value.join(members.value, localStream);
     localStream = null;
     voice.value.setVolume(volume.value);
+    await flushPendingVoiceSignals();
     voiceJoined.value = true;
     send({ type: "voice_join", roomCode: roomCode.value, memberId: identity.memberId });
   } catch (err) {
@@ -521,6 +544,7 @@ function normalizeVoiceError(err: unknown): string {
 
 function leaveVoice(): void {
   voice.value?.leave(); voice.value = null;
+  pendingVoiceSignals.length = 0;
   voiceJoined.value = false; voiceJoining.value = false;
   muted.value = false; voiceRelayError.value = ""; voiceIceState.value = {};
   send({ type: "voice_leave", roomCode: roomCode.value, memberId: identity.memberId });
@@ -556,7 +580,7 @@ onBeforeUnmount(() => {
   if (playbackTimeTimer) window.clearInterval(playbackTimeTimer);
   unbindHostPlaybackSnapshotEvents();
   socket.close();
-  voice.value?.leave(); voiceRelayError.value = ""; voiceIceState.value = {};
+  voice.value?.leave(); pendingVoiceSignals.length = 0; voiceRelayError.value = ""; voiceIceState.value = {};
   hostStream.value?.stop(); hostStream.value = null; hostStreamPromise = null;
   remoteMediaStream.value = null; remoteStreamReady.value = false;
   hostStreamPlaybackSnapshot.value = null; hostStreamPlaybackClock.value = null;
