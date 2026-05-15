@@ -1,6 +1,6 @@
 import type { RoomMember } from "@sync-seat/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveVoiceTurnIceServers, VoiceMesh } from "./voice";
+import { resolveVoiceTurnIceServers, unlockVoiceAudioPlayback, VoiceMesh } from "./voice";
 
 class FakeRTCPeerConnection {
   static configs: RTCConfiguration[] = [];
@@ -81,6 +81,9 @@ const remoteMember: RoomMember = {
 
 describe("VoiceMesh", () => {
   afterEach(() => {
+    FakeAudioContext.contexts.forEach((context) => {
+      context.state = "closed";
+    });
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
     FakeRTCPeerConnection.configs = [];
@@ -144,6 +147,17 @@ describe("VoiceMesh", () => {
   it("加入语音时提前恢复 AudioContext，避免直链模式远端音轨异步到达后被浏览器挂起", async () => {
     await createJoinedVoiceMesh();
 
+    expect(FakeAudioContext.contexts[0].resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("用户点击加入语音时可以同步解锁后续复用的 AudioContext", async () => {
+    vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+
+    unlockVoiceAudioPlayback();
+    await createJoinedVoiceMesh();
+
+    expect(FakeAudioContext.contexts).toHaveLength(1);
     expect(FakeAudioContext.contexts[0].resume).toHaveBeenCalledTimes(1);
   });
 

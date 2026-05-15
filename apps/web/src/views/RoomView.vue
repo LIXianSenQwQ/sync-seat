@@ -13,7 +13,7 @@ import { describeHostStreamRoute, type HostStreamIceDiagnostics } from "../servi
 import { useIdentityStore } from "../stores/identity";
 import { RoomSocket, type RoomStateSyncClock } from "../services/realtime";
 import { targetPosition } from "../services/playback-sync";
-import { resolveVoiceTurnIceServers, VoiceMesh } from "../services/voice";
+import { resolveVoiceTurnIceServers, unlockVoiceAudioPlayback, VoiceMesh } from "../services/voice";
 import type { FunctionSection } from "../components/FunctionNav.vue";
 
 type MemberProgressViewSnapshot = MemberWatchProgressSnapshot & {
@@ -474,6 +474,7 @@ async function joinVoice(): Promise<void> {
   let localStream: MediaStream | null = null;
   voiceJoining.value = true; error.value = ""; voiceRelayError.value = "";
   try {
+    unlockVoiceAudioPlayback();
     const iceServers = await api.getVoiceIceServers();
     if (resolveVoiceTurnIceServers(iceServers).length === 0) {
       throw new Error("语音已配置为强制 TURN 中继，但当前没有可用 TURN 服务。请联系部署者配置真实的 WEBRTC_TURN_URLS、WEBRTC_TURN_USERNAME 和 TURN_AUTH_SECRET。");

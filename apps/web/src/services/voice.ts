@@ -1,6 +1,7 @@
 import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 
 const MAX_REMOTE_VOICE_GAIN = 2;
+let sharedVoiceAudioContext: AudioContext | null = null;
 
 type RemoteVoiceAudio = {
   context: AudioContext;
@@ -17,7 +18,6 @@ type RemoteVoiceAudio = {
  */
 export class VoiceMesh {
   private localStream: MediaStream | null = null;
-  private audioContext: AudioContext | null = null;
   private peers = new Map<string, RTCPeerConnection>();
   private remoteAudio = new Map<string, RemoteVoiceAudio>();
   private volume = 1;
@@ -60,8 +60,7 @@ export class VoiceMesh {
     this.peers.clear();
     this.pendingCandidates.clear();
     this.cleanupRemoteAudio();
-    void this.audioContext?.close().catch(() => undefined);
-    this.audioContext = null;
+    void closeSharedVoiceAudioContext();
   }
 
   setMuted(muted: boolean): void {
@@ -196,11 +195,7 @@ export class VoiceMesh {
    * @returns 已创建或新建的 AudioContext。
    */
   private ensureAudioContextSync(): AudioContext {
-    if (!this.audioContext || this.audioContext.state === "closed") {
-      const AudioContextConstructor = resolveAudioContextConstructor();
-      this.audioContext = new AudioContextConstructor();
-    }
-    return this.audioContext;
+    return ensureSharedVoiceAudioContext();
   }
 
   /**
@@ -264,6 +259,40 @@ function isTurnUrl(url: string): boolean {
 
 function hasTurnCredentials(server: IceServerConfig): boolean {
   return Boolean(server.username?.trim() && server.credential?.trim());
+}
+
+/**
+ * 在用户点击“加入语音”的同步调用栈内解锁 Web Audio。
+ *
+ * 增益链路依赖 AudioContext；如果等 ICE、麦克风授权或远端 ontrack 后再创建，
+ * 浏览器可能已失去用户激活上下文，导致直链模式或推流开始前的语音无声。
+ */
+export function unlockVoiceAudioPlayback(): void {
+  const context = ensureSharedVoiceAudioContext();
+  if (context.state === "suspended") {
+    void context.resume().catch(() => undefined);
+  }
+}
+
+/**
+ * 释放语音播放的共享 AudioContext。
+ */
+function closeSharedVoiceAudioContext(): void {
+  void sharedVoiceAudioContext?.close().catch(() => undefined);
+  sharedVoiceAudioContext = null;
+}
+
+/**
+ * 获取语音播放共用的 AudioContext。
+ *
+ * @returns 已创建或新建的 AudioContext。
+ */
+function ensureSharedVoiceAudioContext(): AudioContext {
+  if (!sharedVoiceAudioContext || sharedVoiceAudioContext.state === "closed") {
+    const AudioContextConstructor = resolveAudioContextConstructor();
+    sharedVoiceAudioContext = new AudioContextConstructor();
+  }
+  return sharedVoiceAudioContext;
 }
 
 /**
