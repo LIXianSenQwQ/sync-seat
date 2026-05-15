@@ -35,12 +35,17 @@ class FakeRTCPeerConnection {
 
 class FakeAudioContext {
   static contexts: FakeAudioContext[] = [];
+  state: AudioContextState = "suspended";
   destination = {};
   sources: Array<{ stream: MediaStream; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
   gains: Array<{ gain: { value: number }; connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
   destinations: Array<{ stream: MediaStream; disconnect: ReturnType<typeof vi.fn> }> = [];
-  resume = vi.fn(async () => undefined);
-  close = vi.fn(async () => undefined);
+  resume = vi.fn(async () => {
+    this.state = "running";
+  });
+  close = vi.fn(async () => {
+    this.state = "closed";
+  });
 
   constructor() {
     FakeAudioContext.contexts.push(this);
@@ -115,6 +120,7 @@ describe("VoiceMesh", () => {
 
   it("创建语音 PeerConnection 时强制使用 relay 策略", async () => {
     vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+    vi.stubGlobal("AudioContext", FakeAudioContext);
     const localStream = {
       getTracks: () => [{ kind: "audio" }]
     } as unknown as MediaStream;
@@ -133,6 +139,12 @@ describe("VoiceMesh", () => {
       iceTransportPolicy: "relay",
       iceServers: [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }]
     });
+  });
+
+  it("加入语音时提前恢复 AudioContext，避免直链模式远端音轨异步到达后被浏览器挂起", async () => {
+    await createJoinedVoiceMesh();
+
+    expect(FakeAudioContext.contexts[0].resume).toHaveBeenCalledTimes(1);
   });
 
   it("拉满语音总音量时远端语音使用 200% 增益", async () => {

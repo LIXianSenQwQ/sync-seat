@@ -17,6 +17,7 @@ type RemoteVoiceAudio = {
  */
 export class VoiceMesh {
   private localStream: MediaStream | null = null;
+  private audioContext: AudioContext | null = null;
   private peers = new Map<string, RTCPeerConnection>();
   private remoteAudio = new Map<string, RemoteVoiceAudio>();
   private volume = 1;
@@ -43,6 +44,7 @@ export class VoiceMesh {
    * @param localStream 已经由页面用户手势获取到的本地麦克风流。
    */
   async join(members: RoomMember[], localStream?: MediaStream): Promise<void> {
+    await this.ensureAudioContext();
     this.localStream = localStream ?? await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     for (const member of members) {
       if (member.memberId !== this.memberId && member.voiceJoined) {
@@ -58,6 +60,8 @@ export class VoiceMesh {
     this.peers.clear();
     this.pendingCandidates.clear();
     this.cleanupRemoteAudio();
+    void this.audioContext?.close().catch(() => undefined);
+    this.audioContext = null;
   }
 
   setMuted(muted: boolean): void {
@@ -151,8 +155,7 @@ export class VoiceMesh {
    */
   private attachRemoteAudio(targetMemberId: string, stream: MediaStream): void {
     this.cleanupRemoteAudio(targetMemberId);
-    const AudioContextConstructor = resolveAudioContextConstructor();
-    const context = new AudioContextConstructor();
+    const context = this.ensureAudioContextSync();
     const source = context.createMediaStreamSource(stream);
     const gain = context.createGain();
     const destination = context.createMediaStreamDestination();
@@ -174,6 +177,33 @@ export class VoiceMesh {
   }
 
   /**
+   * 提前创建并恢复音频上下文。
+   *
+   * 浏览器通常要求 Web Audio 在用户手势链路中解锁；直链模式没有房主推流的视频播放动作兜底，
+   * 因此加入语音时先预热上下文，远端音轨到达后只复用该上下文。
+   */
+  private async ensureAudioContext(): Promise<AudioContext> {
+    const context = this.ensureAudioContextSync();
+    if (context.state === "suspended") {
+      await context.resume().catch(() => undefined);
+    }
+    return context;
+  }
+
+  /**
+   * 获取当前语音播放使用的 AudioContext。
+   *
+   * @returns 已创建或新建的 AudioContext。
+   */
+  private ensureAudioContextSync(): AudioContext {
+    if (!this.audioContext || this.audioContext.state === "closed") {
+      const AudioContextConstructor = resolveAudioContextConstructor();
+      this.audioContext = new AudioContextConstructor();
+    }
+    return this.audioContext;
+  }
+
+  /**
    * 清理远端语音播放资源。
    *
    * @param targetMemberId 指定成员 ID；为空时清理全部远端播放链路。
@@ -190,7 +220,6 @@ export class VoiceMesh {
       audio.element.pause();
       audio.element.srcObject = null;
       audio.element.remove();
-      void audio.context.close().catch(() => undefined);
       this.remoteAudio.delete(memberId);
     }
   }
