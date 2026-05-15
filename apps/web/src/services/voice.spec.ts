@@ -6,6 +6,7 @@ class FakeRTCPeerConnection {
   static configs: RTCConfiguration[] = [];
   static instances: FakeRTCPeerConnection[] = [];
   iceConnectionState: RTCIceConnectionState = "new";
+  localDescription: RTCSessionDescription | null = null;
   remoteDescription: RTCSessionDescription | null = null;
   ontrack: ((event: RTCTrackEvent) => void) | null = null;
   onicecandidate: ((event: RTCPeerConnectionIceEvent) => void) | null = null;
@@ -24,8 +25,20 @@ class FakeRTCPeerConnection {
     return { type: "offer", sdp: "offer" };
   }
 
-  async setLocalDescription(): Promise<void> {
-    // 测试只关心创建连接时的 ICE 策略。
+  async createAnswer(): Promise<RTCSessionDescriptionInit> {
+    return { type: "answer", sdp: "answer" };
+  }
+
+  async setLocalDescription(description?: RTCSessionDescriptionInit): Promise<void> {
+    this.localDescription = description as RTCSessionDescription;
+  }
+
+  async setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+    this.remoteDescription = description as RTCSessionDescription;
+  }
+
+  async addIceCandidate(): Promise<void> {
+    // 测试桩无需解析候选。
   }
 
   close(): void {
@@ -84,6 +97,7 @@ describe("VoiceMesh", () => {
     FakeAudioContext.contexts.forEach((context) => {
       context.state = "closed";
     });
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
     FakeRTCPeerConnection.configs = [];
@@ -161,6 +175,15 @@ describe("VoiceMesh", () => {
     expect(FakeAudioContext.contexts[0].resume).toHaveBeenCalledTimes(1);
   });
 
+  it("增强路径直接输出到 AudioContext.destination，不再依赖隐藏 audio.play", async () => {
+    const mesh = await createJoinedVoiceMesh();
+
+    emitRemoteTrack();
+
+    expect(FakeAudioContext.contexts[0].gains[0].connect).toHaveBeenCalledWith(FakeAudioContext.contexts[0].destination);
+    expect(document.querySelectorAll("audio")).toHaveLength(0);
+  });
+
   it("拉满语音总音量时远端语音使用 200% 增益", async () => {
     const mesh = await createJoinedVoiceMesh();
 
@@ -197,30 +220,103 @@ describe("VoiceMesh", () => {
 
     expect(context.sources[0].disconnect).toHaveBeenCalledTimes(1);
     expect(context.gains[0].disconnect).toHaveBeenCalledTimes(1);
-    expect(context.destinations[0].disconnect).toHaveBeenCalledTimes(1);
     expect(context.close).toHaveBeenCalledTimes(1);
     expect(document.querySelectorAll("audio")).toHaveLength(0);
+  });
+
+  it("Web Audio 不可用时回退到原生 audio 播放远端语音", async () => {
+    vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+    vi.stubGlobal("AudioContext", undefined);
+    const playSpy = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    const mesh = new VoiceMesh(
+      [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }],
+      "local-member",
+      vi.fn()
+    );
+    await mesh.join([remoteMember], createLocalStream());
+
+    emitRemoteTrack();
+
+    const audio = document.querySelector("audio")!;
+    expect(audio).toBeTruthy();
+    expect(audio.volume).toBe(1);
+    expect(playSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("房主先加入语音、观众后加入语音时双方都能处理远端音轨", async () => {
+    const sentSignals: Array<{ from: string; target: string; type: "offer" | "answer" | "ice_candidate"; payload: unknown }> = [];
+    const owner = await createVoiceMesh("owner", [], sentSignals);
+    const viewer = await createVoiceMesh("viewer", [{ ...remoteMember, memberId: "owner" }], sentSignals);
+    const offer = sentSignals.find((signal) => signal.from === "viewer" && signal.target === "owner" && signal.type === "offer")!;
+
+    await owner.handleSignal("viewer", "offer", offer.payload);
+    const answer = sentSignals.find((signal) => signal.from === "owner" && signal.target === "viewer" && signal.type === "answer")!;
+    await viewer.handleSignal("owner", "answer", answer.payload);
+    emitRemoteTrackAt(0);
+    emitRemoteTrackAt(1);
+
+    expect(FakeRTCPeerConnection.instances).toHaveLength(2);
+    expect(FakeAudioContext.contexts[0].sources).toHaveLength(2);
+  });
+
+  it("观众先加入语音、房主后加入语音时双方都能处理远端音轨", async () => {
+    const sentSignals: Array<{ from: string; target: string; type: "offer" | "answer" | "ice_candidate"; payload: unknown }> = [];
+    const viewer = await createVoiceMesh("viewer", [], sentSignals);
+    const owner = await createVoiceMesh("owner", [{ ...remoteMember, memberId: "viewer" }], sentSignals);
+    const offer = sentSignals.find((signal) => signal.from === "owner" && signal.target === "viewer" && signal.type === "offer")!;
+
+    await viewer.handleSignal("owner", "offer", offer.payload);
+    const answer = sentSignals.find((signal) => signal.from === "viewer" && signal.target === "owner" && signal.type === "answer")!;
+    await owner.handleSignal("viewer", "answer", answer.payload);
+    emitRemoteTrackAt(0);
+    emitRemoteTrackAt(1);
+
+    expect(FakeRTCPeerConnection.instances).toHaveLength(2);
+    expect(FakeAudioContext.contexts[0].sources).toHaveLength(2);
   });
 });
 
 async function createJoinedVoiceMesh(): Promise<VoiceMesh> {
   vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
   vi.stubGlobal("AudioContext", FakeAudioContext);
-  const localStream = {
-    getTracks: () => [{ kind: "audio", stop: vi.fn() }],
-    getAudioTracks: () => [{ enabled: true }]
-  } as unknown as MediaStream;
   const mesh = new VoiceMesh(
     [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }],
     "local-member",
     vi.fn()
   );
 
-  await mesh.join([remoteMember], localStream);
+  await mesh.join([remoteMember], createLocalStream());
   return mesh;
 }
 
 function emitRemoteTrack(): void {
+  emitRemoteTrackAt(0);
+}
+
+function emitRemoteTrackAt(index: number): void {
   const remoteStream = new MediaStream();
-  FakeRTCPeerConnection.instances[0].ontrack?.({ streams: [remoteStream] } as unknown as RTCTrackEvent);
+  FakeRTCPeerConnection.instances[index].ontrack?.({ streams: [remoteStream] } as unknown as RTCTrackEvent);
+}
+
+function createLocalStream(): MediaStream {
+  return {
+    getTracks: () => [{ kind: "audio", stop: vi.fn() }],
+    getAudioTracks: () => [{ enabled: true }]
+  } as unknown as MediaStream;
+}
+
+async function createVoiceMesh(
+  memberId: string,
+  members: RoomMember[],
+  sentSignals: Array<{ from: string; target: string; type: "offer" | "answer" | "ice_candidate"; payload: unknown }>
+): Promise<VoiceMesh> {
+  vi.stubGlobal("RTCPeerConnection", FakeRTCPeerConnection);
+  vi.stubGlobal("AudioContext", FakeAudioContext);
+  const mesh = new VoiceMesh(
+    [{ urls: "turn:turn.example.cn:3478?transport=tcp", username: "sync-seat", credential: "secret" }],
+    memberId,
+    (target, type, payload) => sentSignals.push({ from: memberId, target, type, payload })
+  );
+  await mesh.join(members, createLocalStream());
+  return mesh;
 }

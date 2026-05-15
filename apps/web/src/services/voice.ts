@@ -3,13 +3,19 @@ import type { IceServerConfig, RoomMember } from "@sync-seat/shared";
 const MAX_REMOTE_VOICE_GAIN = 2;
 let sharedVoiceAudioContext: AudioContext | null = null;
 
-type RemoteVoiceAudio = {
+type EnhancedRemoteVoiceAudio = {
+  mode: "enhanced";
   context: AudioContext;
   source: MediaStreamAudioSourceNode;
   gain: GainNode;
-  destination: MediaStreamAudioDestinationNode;
+};
+
+type FallbackRemoteVoiceAudio = {
+  mode: "fallback";
   element: HTMLAudioElement;
 };
+
+type RemoteVoiceAudio = EnhancedRemoteVoiceAudio | FallbackRemoteVoiceAudio;
 
 /**
  * WebRTC TURN 中继语音管理器。
@@ -72,7 +78,11 @@ export class VoiceMesh {
   setVolume(volume: number): void {
     this.volume = Math.min(1, Math.max(0, volume));
     this.remoteAudio.forEach((audio) => {
-      audio.gain.gain.value = this.resolveRemoteVoiceGain();
+      if (audio.mode === "enhanced") {
+        audio.gain.gain.value = this.resolveRemoteVoiceGain();
+        return;
+      }
+      audio.element.volume = this.volume;
     });
   }
 
@@ -120,7 +130,7 @@ export class VoiceMesh {
     // 步骤1：本地音频轨道加入每条 TURN 中继语音连接。
     this.localStream?.getTracks().forEach((track) => peer.addTrack(track, this.localStream!));
 
-    // 步骤2：远端音轨通过 Web Audio 增益后交给 audio 元素播放，兼顾增益和浏览器播放兼容性。
+    // 步骤2：远端音轨优先通过已解锁的 Web Audio 增益播放，失败时回退原生 audio。
     peer.ontrack = (event) => {
       const [remoteStream] = event.streams;
       if (remoteStream) this.attachRemoteAudio(targetMemberId, remoteStream);
@@ -154,25 +164,64 @@ export class VoiceMesh {
    */
   private attachRemoteAudio(targetMemberId: string, stream: MediaStream): void {
     this.cleanupRemoteAudio(targetMemberId);
-    const context = this.ensureAudioContextSync();
-    const source = context.createMediaStreamSource(stream);
-    const gain = context.createGain();
-    const destination = context.createMediaStreamDestination();
+    const enhanced = this.attachEnhancedRemoteAudio(stream);
+    if (enhanced) {
+      this.remoteAudio.set(targetMemberId, enhanced);
+      return;
+    }
+    this.remoteAudio.set(targetMemberId, this.attachFallbackRemoteAudio(stream));
+  }
+
+  /**
+   * 使用 Web Audio 增益播放远端语音。
+   *
+   * @param stream 远端 WebRTC 音频流。
+   * @returns 可清理的增强播放资源；不可用时返回空并交给原生 audio 兜底。
+   */
+  private attachEnhancedRemoteAudio(stream: MediaStream): EnhancedRemoteVoiceAudio | null {
+    try {
+      const context = this.ensureAudioContextSync();
+      if (!context) {
+        console.warn("[VoiceMesh] 当前浏览器不支持 AudioContext，使用原生 audio 兜底");
+        return null;
+      }
+      if (context.state === "suspended") {
+        void context.resume().catch((err) => console.warn("[VoiceMesh] 恢复 AudioContext 失败，尝试原生 audio 兜底", err));
+      }
+      if (context.state !== "running") {
+        console.warn(`[VoiceMesh] AudioContext 当前状态为 ${context.state}，使用原生 audio 兜底`);
+        return null;
+      }
+      const source = context.createMediaStreamSource(stream);
+      const gain = context.createGain();
+
+      // 步骤1：将 UI 的 0..1 音量映射为 0..2 增益，保留原滑块交互但提供最高 200% 响度。
+      gain.gain.value = this.resolveRemoteVoiceGain();
+
+      // 步骤2：直接输出到 AudioContext.destination，避免 hidden audio.play 被浏览器拦截。
+      source.connect(gain);
+      gain.connect(context.destination);
+      return { mode: "enhanced", context, source, gain };
+    } catch (err) {
+      console.warn("[VoiceMesh] Web Audio 增强语音不可用，使用原生 audio 兜底", err);
+      return null;
+    }
+  }
+
+  /**
+   * 使用原生 audio 播放远端语音。
+   *
+   * @param stream 远端 WebRTC 音频流。
+   * @returns 可清理的原生播放资源。
+   */
+  private attachFallbackRemoteAudio(stream: MediaStream): FallbackRemoteVoiceAudio {
     const element = document.createElement("audio");
-
-    // 步骤1：将 UI 的 0..1 音量映射为 0..2 增益，保留原滑块交互但提供最高 200% 响度。
-    gain.gain.value = this.resolveRemoteVoiceGain();
-
-    // 步骤2：Web Audio 只负责放大，最终仍用隐藏 audio 元素承载播放，避免部分浏览器 destination 无声。
-    source.connect(gain);
-    gain.connect(destination);
     element.autoplay = true;
-    element.volume = 1;
-    element.srcObject = destination.stream;
+    element.volume = this.volume;
+    element.srcObject = stream;
     document.body.appendChild(element);
-    void context.resume().catch(() => undefined);
-    void element.play().catch(() => undefined);
-    this.remoteAudio.set(targetMemberId, { context, source, gain, destination, element });
+    void element.play().catch((err) => console.warn("[VoiceMesh] 原生 audio 兜底播放失败", err));
+    return { mode: "fallback", element };
   }
 
   /**
@@ -181,9 +230,9 @@ export class VoiceMesh {
    * 浏览器通常要求 Web Audio 在用户手势链路中解锁；直链模式没有房主推流的视频播放动作兜底，
    * 因此加入语音时先预热上下文，远端音轨到达后只复用该上下文。
    */
-  private async ensureAudioContext(): Promise<AudioContext> {
+  private async ensureAudioContext(): Promise<AudioContext | null> {
     const context = this.ensureAudioContextSync();
-    if (context.state === "suspended") {
+    if (context?.state === "suspended") {
       await context.resume().catch(() => undefined);
     }
     return context;
@@ -192,9 +241,9 @@ export class VoiceMesh {
   /**
    * 获取当前语音播放使用的 AudioContext。
    *
-   * @returns 已创建或新建的 AudioContext。
+   * @returns 已创建或新建的 AudioContext；浏览器不支持时返回空。
    */
-  private ensureAudioContextSync(): AudioContext {
+  private ensureAudioContextSync(): AudioContext | null {
     return ensureSharedVoiceAudioContext();
   }
 
@@ -209,12 +258,14 @@ export class VoiceMesh {
       : Array.from(this.remoteAudio.entries());
 
     for (const [memberId, audio] of entries) {
-      audio.source.disconnect();
-      audio.gain.disconnect();
-      audio.destination.disconnect();
-      audio.element.pause();
-      audio.element.srcObject = null;
-      audio.element.remove();
+      if (audio.mode === "enhanced") {
+        audio.source.disconnect();
+        audio.gain.disconnect();
+      } else {
+        audio.element.pause();
+        audio.element.srcObject = null;
+        audio.element.remove();
+      }
       this.remoteAudio.delete(memberId);
     }
   }
@@ -269,7 +320,7 @@ function hasTurnCredentials(server: IceServerConfig): boolean {
  */
 export function unlockVoiceAudioPlayback(): void {
   const context = ensureSharedVoiceAudioContext();
-  if (context.state === "suspended") {
+  if (context?.state === "suspended") {
     void context.resume().catch(() => undefined);
   }
 }
@@ -285,11 +336,12 @@ function closeSharedVoiceAudioContext(): void {
 /**
  * 获取语音播放共用的 AudioContext。
  *
- * @returns 已创建或新建的 AudioContext。
+ * @returns 已创建或新建的 AudioContext；浏览器不支持时返回空。
  */
-function ensureSharedVoiceAudioContext(): AudioContext {
+function ensureSharedVoiceAudioContext(): AudioContext | null {
   if (!sharedVoiceAudioContext || sharedVoiceAudioContext.state === "closed") {
     const AudioContextConstructor = resolveAudioContextConstructor();
+    if (!AudioContextConstructor) return null;
     sharedVoiceAudioContext = new AudioContextConstructor();
   }
   return sharedVoiceAudioContext;
@@ -300,6 +352,6 @@ function ensureSharedVoiceAudioContext(): AudioContext {
  *
  * @returns 标准或兼容前缀的 AudioContext 构造器。
  */
-function resolveAudioContextConstructor(): typeof AudioContext {
-  return window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext!;
+function resolveAudioContextConstructor(): typeof AudioContext | null {
+  return window.AudioContext ?? (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext ?? null;
 }
